@@ -1,5 +1,43 @@
+# Central reviewer routing. Applied to every target repository.
+#
+# Rules enforced by scripts/common/reviewers.py:
+#   * the PR author is never requested
+#   * duplicates, and reviewers already requested on the PR, are skipped
+#   * existing reviewers are preserved (reviewers are only ever added)
+#   * when the target repository has a CODEOWNERS file that already covers every
+#     changed path, reviewer assignment is skipped entirely
+#   * a user or team that GitHub cannot resolve is reported, not fatal
+#
+# Fill in real GitHub logins and team slugs (without the org prefix). Leaving a
+# group empty is valid: it matches, reports "no assignable reviewers", and does
+# not fail the run.
 reviewers:
-  backend: { paths: ["backend/**"], users: [], teams: [] }
-  frontend: { paths: ["frontend/**", "admin/**"], users: [], teams: [] }
-  devops: { paths: ["terraform/**", "helm/**", ".github/workflows/**"], users: [], teams: [] }
-  security: { paths: ["**/auth/**", "security/**"], users: [], teams: [] }
+  backend:
+    paths:
+      - "backend/**"
+    users: []
+    teams: []
+
+  frontend:
+    paths:
+      - "frontend/**"
+      - "admin/**"
+    users: []
+    teams: []
+
+  devops:
+    paths:
+      - "terraform/**"
+      - "helm/**"
+      - ".github/workflows/**"
+      - "**/Dockerfile"
+      - "docker-compose.*"
+    users: []
+    teams: []
+
+  security:
+    paths:
+      - "**/auth/**"
+      - "security/**"
+    users: []
+    teams: []

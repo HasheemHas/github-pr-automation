@@ -1,33 +1,101 @@
-# Add only repositories where the GitHub App is installed. Repository names are
-# relative to the GitHub Actions variable GITHUB_ORG.
+# Central allowlist of target repositories.
+#
+# Repository names are relative to the TARGET_ORG Actions variable, so
+# TARGET_ORG=mycompany plus repository=yshrm resolves to mycompany/yshrm.
+#
+# Add a repository only after the GitHub App is installed on it, then set
+# enabled: true. Commands run in a credential-free job against the target's PR
+# head, so they may execute target-authored code; never add a command that needs
+# a secret.
 repositories:
   yshrm:
     enabled: true
     type: fullstack
     commands:
       install:
-        - python -m pip install -r backend/requirements.txt
-        - npm --prefix frontend ci
-        - npm --prefix admin ci
+        - name: Backend dependencies
+          run: python -m pip install --disable-pip-version-check -r backend/requirements.txt
+        - name: Frontend dependencies
+          run: npm --prefix frontend ci --ignore-scripts
+        - name: Admin dependencies
+          run: npm --prefix admin ci --ignore-scripts
       lint:
-        - npm --prefix frontend run lint
-        - npm --prefix admin run lint
-      test: []
+        - name: Backend syntax
+          run: >-
+            python -c "import pathlib,sys;
+            [compile(p.read_bytes(), str(p), 'exec')
+             for p in pathlib.Path('backend/app').rglob('*.py')]"
+        - name: Frontend lint
+          run: npm --prefix frontend run lint
+        - name: Admin lint
+          run: npm --prefix admin run lint
+      test:
+        - name: Backend tests
+          run: >-
+            sh -c 'if [ -d backend/tests ] || [ -d tests ];
+            then python -m pytest -q; else echo "no python tests configured"; fi'
       build:
-        - npm --prefix frontend run build
-        - npm --prefix admin run build
+        - name: Frontend build
+          run: npm --prefix frontend run build
+        - name: Admin build
+          run: npm --prefix admin run build
     security:
       gitleaks: true
       semgrep: false
       trivy: false
+    metadata:
+      # weak   replace only a placeholder PR title ("update", "fix", "Update x.py")
+      # always replace whenever the AI proposes something different
+      # never  never touch the title
+      title_policy: weak
+    review:
+      inline_comments: true
+    # Container isolation for target-controlled commands. The validation job holds
+    # no credentials either way; this stops target code reaching the central
+    # scripts or the validation artifacts. REQUIRED for action=fix and
+    # action=resolve-conflicts: without it those actions refuse to run.
+    sandbox:
+      enabled: false
+      image: ''            # e.g. a pinned image digest carrying node 22 + python 3.12
+      required_binaries: [sh, node, npm, python3]
+      isolate_network: false   # true = network only for the install group
+      network_groups: [install]
+      memory: 4g
+      pids_limit: 512
+    # Paths an AI-authored patch may modify. Empty means fixes are disabled.
+    # The global deny list in scripts/plan.py always wins.
+    fix_allowed_paths:
+      - backend/app/**/*.py
+      - frontend/src/**
+      - admin/src/**
+    resolve_allowed_paths:
+      - backend/app/**/*.py
+      - frontend/src/**
+      - admin/src/**
 
-  # Example; set enabled: true only after the GitHub App is installed there.
+  # Example. Set enabled: true only after the GitHub App is installed there.
   yshrms-api:
     enabled: false
     type: python
     commands:
-      install: ["pip install -r requirements.txt"]
-      lint: ["ruff check ."]
-      test: ["pytest"]
+      install:
+        - name: Dependencies
+          run: python -m pip install --disable-pip-version-check -r requirements.txt
+      lint:
+        - name: Ruff
+          run: ruff check .
+      test:
+        - name: Pytest
+          run: python -m pytest -q
       build: []
-    security: { gitleaks: true, semgrep: true, trivy: false }
+    security:
+      gitleaks: true
+      semgrep: true
+      trivy: false
+    metadata:
+      title_policy: weak
+    sandbox:
+      enabled: false
+      image: ''
+    fix_allowed_paths: []
+    resolve_allowed_paths: []

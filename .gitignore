@@ -1,0 +1,22 @@
+# Credentials — never commit any of these.
+*.pem
+*.key
+*.private-key.*
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# Local run output
+pr-automation-artifacts/
+target/

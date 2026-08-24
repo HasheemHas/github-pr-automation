@@ -1,14 +1,65 @@
 name: Central release preparation
+
+# Read-only in Phase 1. It computes the next semantic version for an allowlisted
+# target repository and prints it; it creates nothing.
+#
+# Release creation is deliberately not automated yet: it needs an explicit
+# versioning policy plus a GitHub App Contents-write approval per target.
+#
+# When it is turned on (Phase 2), the release-after-merge trigger belongs in the
+# TARGET repository as `on: push: branches: [main]`, not as a
+# `pull_request: [closed]` workflow. A fork PR's GITHUB_TOKEN is read-only, so a
+# closed-PR workflow cannot create a release at all, and a closed-but-unmerged PR
+# must never produce one.
+
 on:
   workflow_dispatch:
     inputs:
-      repository: { description: 'Configured target repository', required: true, type: string }
-      pr_number: { description: 'Merged target pull request number', required: true, type: number }
+      repository:
+        description: 'Allowlisted target repository name (without the owner prefix)'
+        required: true
+        type: string
+      version:
+        description: 'Optional explicit version, for example 1.2.3'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
 jobs:
-  release:
+  propose-version:
+    name: propose-version
     runs-on: ubuntu-latest
     steps:
-      - run: |
-          echo 'Release preparation is intentionally not automated yet.'
-          echo 'A target release needs an explicit versioning policy and a GitHub App Contents-write approval.'
-          exit 1
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install central dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Resolve the target
+        id: plan
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          TARGET_ACTION: metadata
+          TARGET_ORG: ${{ vars.TARGET_ORG }}
+        run: python -m scripts.plan
+      - name: Mint a short-lived read token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ steps.plan.outputs.owner }}
+          repositories: ${{ steps.plan.outputs.repo }}
+          permission-contents: read
+      - name: Compute the next version
+        env:
+          TARGET_FULL_REPO: ${{ steps.plan.outputs.full_name }}
+          TARGET_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          EXPLICIT_VERSION: ${{ inputs.version }}
+        run: python -m scripts.release.propose
