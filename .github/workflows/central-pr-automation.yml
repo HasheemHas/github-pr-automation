@@ -6,6 +6,10 @@ on:
       repository: { required: true, type: string }
       pr_number: { required: true, type: number }
       action: { required: true, type: string }
+    secrets:
+      GH_APP_ID: { required: true }
+      GH_APP_PRIVATE_KEY: { required: true }
+      NVIDIA_API_KEY: { required: true }
   workflow_dispatch:
     inputs:
       repository: { description: "Configured target repository name (without owner)", required: true, type: string }
