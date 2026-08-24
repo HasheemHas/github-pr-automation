@@ -1,0 +1,15 @@
+name: Central PR labels and reviewers
+on:
+  workflow_dispatch:
+    inputs:
+      repository: { description: 'Configured target repository', required: true, type: string }
+      pr_number: { description: 'Target pull request number', required: true, type: number }
+      action: { description: 'Operation', required: true, default: labels, type: choice, options: [labels, reviewers] }
+jobs:
+  automation:
+    uses: ./.github/workflows/central-pr-automation.yml
+    with:
+      repository: ${{ inputs.repository }}
+      pr_number: ${{ inputs.pr_number }}
+      action: ${{ inputs.action }}
+    secrets: inherit

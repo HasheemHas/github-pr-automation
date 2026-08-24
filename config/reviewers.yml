@@ -1,0 +1,5 @@
+reviewers:
+  backend: { paths: ["backend/**"], users: [], teams: [] }
+  frontend: { paths: ["frontend/**", "admin/**"], users: [], teams: [] }
+  devops: { paths: ["terraform/**", "helm/**", ".github/workflows/**"], users: [], teams: [] }
+  security: { paths: ["**/auth/**", "security/**"], users: [], teams: [] }

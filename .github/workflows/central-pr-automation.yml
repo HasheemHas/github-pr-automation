@@ -1,0 +1,116 @@
+name: Central PR Automation
+
+on:
+  workflow_call:
+    inputs:
+      repository: { required: true, type: string }
+      pr_number: { required: true, type: number }
+      action: { required: true, type: string }
+  workflow_dispatch:
+    inputs:
+      repository: { description: "Configured target repository name (without owner)", required: true, type: string }
+      pr_number: { description: "Target pull request number", required: true, type: number }
+      action:
+        description: "Operation"
+        required: true
+        default: all
+        type: choice
+        options: [all, metadata, labels, reviewers, review, security, quality, tests, fix, resolve-conflicts]
+
+permissions: { contents: read }
+
+jobs:
+  resolve-and-analyze:
+    runs-on: ubuntu-latest
+    outputs:
+      owner: ${{ steps.target.outputs.owner }}
+      repo: ${{ steps.target.outputs.repo }}
+      head_sha: ${{ steps.pr.outputs.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Validate configured target
+        id: target
+        env: { TARGET_REPOSITORY: '${{ inputs.repository }}', GITHUB_ORG: '${{ vars.GITHUB_ORG }}' }
+        run: |
+          python - <<'PY'
+          import os, yaml
+          name=os.environ['TARGET_REPOSITORY']; data=yaml.safe_load(open('config/repositories.yml'))['repositories']
+          if not os.environ['GITHUB_ORG'] or name not in data or not data[name].get('enabled'): raise SystemExit('Target repository is not enabled in config/repositories.yml or GITHUB_ORG is unset.')
+          open(os.environ['GITHUB_OUTPUT'],'a').write(f'owner={os.environ["GITHUB_ORG"]}\nrepo={name}\n')
+          PY
+      - name: Create short-lived GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target.outputs.owner }}
+          repositories: ${{ steps.target.outputs.repo }}
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: python -m pip install --disable-pip-version-check -r requirements.txt
+      - name: Fetch exact target PR context and diff
+        id: pr
+        env:
+          TARGET_FULL_REPO: ${{ steps.target.outputs.owner }}/${{ steps.target.outputs.repo }}
+          TARGET_PR_NUMBER: ${{ inputs.pr_number }}
+          TARGET_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_CONTEXT_FILE: ${{ runner.temp }}/pr-context.json
+        run: |
+          python scripts/github/get_pr.py
+          python -c 'import json,os; d=json.load(open(os.environ["RUNNER_TEMP"]+"/pr-context.json")); open(os.environ["GITHUB_OUTPUT"],"a").write("head_sha="+d["head_sha"]+"\n")'
+      - name: Download target diff without checking out or running target code
+        env:
+          TARGET_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_FULL_REPO: ${{ steps.target.outputs.owner }}/${{ steps.target.outputs.repo }}
+          TARGET_PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          curl --fail --silent --show-error \
+            -H "Authorization: Bearer $TARGET_GITHUB_TOKEN" \
+            -H 'Accept: application/vnd.github.v3.diff' \
+            "https://api.github.com/repos/$TARGET_FULL_REPO/pulls/$TARGET_PR_NUMBER" \
+            > "$RUNNER_TEMP/pr.diff"
+      - name: Run trusted AI analysis
+        if: inputs.action != 'quality' && inputs.action != 'reviewers' && inputs.action != 'fix' && inputs.action != 'resolve-conflicts'
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          TARGET_ACTION: ${{ inputs.action }}
+          PR_CONTEXT_FILE: ${{ runner.temp }}/pr-context.json
+          PR_DIFF_FILE: ${{ runner.temp }}/pr.diff
+          ANALYSIS_FILE: ${{ runner.temp }}/analysis.json
+        run: python scripts/ai/analyze.py
+      - uses: actions/upload-artifact@v4
+        with: { name: central-pr-result, path: '${{ runner.temp }}', retention-days: 1 }
+
+  report-to-target:
+    needs: resolve-and-analyze
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: central-pr-result, path: result }
+      - name: Create short-lived write token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ needs.resolve-and-analyze.outputs.owner }}
+          repositories: ${{ needs.resolve-and-analyze.outputs.repo }}
+      - name: Update target PR labels, metadata, comments, and check
+        uses: actions/github-script@v7
+        env:
+          OWNER: ${{ needs.resolve-and-analyze.outputs.owner }}
+          REPO: ${{ needs.resolve-and-analyze.outputs.repo }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          ACTION: ${{ inputs.action }}
+          HEAD_SHA: ${{ needs.resolve-and-analyze.outputs.head_sha }}
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const fs=require('fs'), owner=process.env.OWNER, repo=process.env.REPO, number=Number(process.env.PR_NUMBER), contextData=JSON.parse(fs.readFileSync('result/pr-context.json','utf8')); let analysis={metadata:{},review:{findings:[]},tests:{gaps:[]}}; if(fs.existsSync('result/analysis.json')) analysis=JSON.parse(fs.readFileSync('result/analysis.json','utf8'));
+            const files=contextData.files||[]; const labels=new Set(); if(files.some(p=>p.startsWith('backend/')))labels.add('backend'); if(files.some(p=>p.startsWith('frontend/')||p.startsWith('admin/')))labels.add('frontend'); if(files.some(p=>p.startsWith('.github/workflows/')))labels.add('ci'); if(files.some(p=>p.endsWith('.tf')||p.startsWith('terraform/'))){labels.add('terraform');labels.add('devops');} if(files.some(p=>/test|spec/.test(p)))labels.add('tests'); const risk=analysis.metadata?.risk; if(['low','medium','high'].includes(risk))labels.add(`${risk}-risk`);
+            if(['all','labels'].includes(process.env.ACTION) && labels.size) { const existing=await github.paginate(github.rest.issues.listLabelsForRepo,{owner,repo,per_page:100}); const names=new Set(existing.map(x=>x.name)); for(const label of labels)if(!names.has(label))await github.rest.issues.createLabel({owner,repo,name:label,color:'0e8a16',description:'Central PR automation'}); await github.rest.issues.addLabels({owner,repo,issue_number:number,labels:[...labels]}); }
+            if(['all','metadata'].includes(process.env.ACTION) && analysis.metadata?.summary) { const {data:pr}=await github.rest.pulls.get({owner,repo,pull_number:number}); const start='<!-- ai-pr-summary:start -->',end='<!-- ai-pr-summary:end -->', section=`${start}\n## AI PR Summary\n\n${analysis.metadata.summary}\n\n**Change type:** ${analysis.metadata.change_type||'unknown'}  \n**Risk:** ${analysis.metadata.risk||'unknown'}\n${end}`; const body=(pr.body||'').replace(/<!-- ai-pr-summary:start -->[\s\S]*?<!-- ai-pr-summary:end -->\s*/,'').trim(); await github.rest.pulls.update({owner,repo,pull_number:number,body:`${body}${body?'\n\n':''}${section}`}); }
+            const findings=(analysis.review?.findings||[]).filter(x=>x&&x.severity); const high=findings.filter(x=>['critical','high'].includes(String(x.severity).toLowerCase())).length, medium=findings.filter(x=>String(x.severity).toLowerCase()==='medium').length, gaps=(analysis.tests?.gaps||[]); const marker='<!-- pr-automation-report -->'; const body=`${marker}\n## 🤖 PR Automation Report\n\n**Repository:** ${owner}/${repo}  \n**PR:** #${number}\n\n**Metadata:** ${analysis.metadata?.summary?'✅ Generated':'⚪ Not requested'}\n\n**Labels:** ${[...labels].join(', ')||'⚪ None'}\n\n**AI Review:** Critical/High: ${high}; Medium: ${medium}\n\n**Test coverage:** ${gaps.length?`⚠ ${gaps.length} potential scenarios`:'✅ No obvious gaps'}\n\n**Status:** Ready for human review.`; const comments=await github.paginate(github.rest.issues.listComments,{owner,repo,issue_number:number,per_page:100}); const old=comments.find(c=>c.body?.includes(marker)); if(old)await github.rest.issues.updateComment({owner,repo,comment_id:old.id,body});else await github.rest.issues.createComment({owner,repo,issue_number:number,body});
+            const conclusion=high?'failure':'success'; await github.rest.checks.create({owner,repo,name:'PR Automation / Quality Gate',head_sha:process.env.HEAD_SHA,status:'completed',conclusion,output:{title:'Central PR Automation',summary:`AI findings: ${findings.length}; high/critical: ${high}; test gaps: ${gaps.length}`}});

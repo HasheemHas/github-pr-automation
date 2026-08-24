@@ -1,0 +1,33 @@
+# Add only repositories where the GitHub App is installed. Repository names are
+# relative to the GitHub Actions variable GITHUB_ORG.
+repositories:
+  yshrm:
+    enabled: true
+    type: fullstack
+    commands:
+      install:
+        - python -m pip install -r backend/requirements.txt
+        - npm --prefix frontend ci
+        - npm --prefix admin ci
+      lint:
+        - npm --prefix frontend run lint
+        - npm --prefix admin run lint
+      test: []
+      build:
+        - npm --prefix frontend run build
+        - npm --prefix admin run build
+    security:
+      gitleaks: true
+      semgrep: false
+      trivy: false
+
+  # Example; set enabled: true only after the GitHub App is installed there.
+  yshrms-api:
+    enabled: false
+    type: python
+    commands:
+      install: ["pip install -r requirements.txt"]
+      lint: ["ruff check ."]
+      test: ["pytest"]
+      build: []
+    security: { gitleaks: true, semgrep: true, trivy: false }

@@ -1,0 +1,14 @@
+name: Central AI test analysis
+on:
+  workflow_dispatch:
+    inputs:
+      repository: { description: 'Configured target repository', required: true, type: string }
+      pr_number: { description: 'Target pull request number', required: true, type: number }
+jobs:
+  tests:
+    uses: ./.github/workflows/central-pr-automation.yml
+    with:
+      repository: ${{ inputs.repository }}
+      pr_number: ${{ inputs.pr_number }}
+      action: tests
+    secrets: inherit
