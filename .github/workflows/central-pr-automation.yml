@@ -84,11 +84,15 @@ jobs:
         with: { name: central-pr-result, path: '${{ runner.temp }}', retention-days: 1 }
 
   report-to-target:
-    needs: resolve-and-analyze
+    needs: [resolve-and-analyze, validate-target]
+    if: always() && needs.resolve-and-analyze.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with: { name: central-pr-result, path: result }
+      - uses: actions/download-artifact@v4
+        if: needs.validate-target.result != 'skipped'
+        with: { name: central-pr-quality, path: result }
       - name: Create short-lived write token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -113,4 +117,42 @@ jobs:
             if(['all','labels'].includes(process.env.ACTION) && labels.size) { const existing=await github.paginate(github.rest.issues.listLabelsForRepo,{owner,repo,per_page:100}); const names=new Set(existing.map(x=>x.name)); for(const label of labels)if(!names.has(label))await github.rest.issues.createLabel({owner,repo,name:label,color:'0e8a16',description:'Central PR automation'}); await github.rest.issues.addLabels({owner,repo,issue_number:number,labels:[...labels]}); }
             if(['all','metadata'].includes(process.env.ACTION) && analysis.metadata?.summary) { const {data:pr}=await github.rest.pulls.get({owner,repo,pull_number:number}); const start='<!-- ai-pr-summary:start -->',end='<!-- ai-pr-summary:end -->', section=`${start}\n## AI PR Summary\n\n${analysis.metadata.summary}\n\n**Change type:** ${analysis.metadata.change_type||'unknown'}  \n**Risk:** ${analysis.metadata.risk||'unknown'}\n${end}`; const body=(pr.body||'').replace(/<!-- ai-pr-summary:start -->[\s\S]*?<!-- ai-pr-summary:end -->\s*/,'').trim(); await github.rest.pulls.update({owner,repo,pull_number:number,body:`${body}${body?'\n\n':''}${section}`}); }
             const findings=(analysis.review?.findings||[]).filter(x=>x&&x.severity); const high=findings.filter(x=>['critical','high'].includes(String(x.severity).toLowerCase())).length, medium=findings.filter(x=>String(x.severity).toLowerCase()==='medium').length, gaps=(analysis.tests?.gaps||[]); const marker='<!-- pr-automation-report -->'; const body=`${marker}\n## 🤖 PR Automation Report\n\n**Repository:** ${owner}/${repo}  \n**PR:** #${number}\n\n**Metadata:** ${analysis.metadata?.summary?'✅ Generated':'⚪ Not requested'}\n\n**Labels:** ${[...labels].join(', ')||'⚪ None'}\n\n**AI Review:** Critical/High: ${high}; Medium: ${medium}\n\n**Test coverage:** ${gaps.length?`⚠ ${gaps.length} potential scenarios`:'✅ No obvious gaps'}\n\n**Status:** Ready for human review.`; const comments=await github.paginate(github.rest.issues.listComments,{owner,repo,issue_number:number,per_page:100}); const old=comments.find(c=>c.body?.includes(marker)); if(old)await github.rest.issues.updateComment({owner,repo,comment_id:old.id,body});else await github.rest.issues.createComment({owner,repo,issue_number:number,body});
-            const conclusion=high?'failure':'success'; await github.rest.checks.create({owner,repo,name:'PR Automation / Quality Gate',head_sha:process.env.HEAD_SHA,status:'completed',conclusion,output:{title:'Central PR Automation',summary:`AI findings: ${findings.length}; high/critical: ${high}; test gaps: ${gaps.length}`}});
+            const validation=fs.existsSync('result/quality.json')?JSON.parse(fs.readFileSync('result/quality.json','utf8')):[]; const failed=validation.filter(x=>!x.passed); const conclusion=high||failed.length?'failure':'success'; await github.rest.checks.create({owner,repo,name:'PR Automation / Quality Gate',head_sha:process.env.HEAD_SHA,status:'completed',conclusion,output:{title:'Central PR Automation',summary:`AI findings: ${findings.length}; high/critical: ${high}; validation failures: ${failed.length}; test gaps: ${gaps.length}`}});
+
+  validate-target:
+    needs: resolve-and-analyze
+    if: inputs.action == 'all' || inputs.action == 'quality'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - name: Create read token only for checkout
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ needs.resolve-and-analyze.outputs.owner }}
+          repositories: ${{ needs.resolve-and-analyze.outputs.repo }}
+      - name: Check out exact target revision
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.resolve-and-analyze.outputs.owner }}/${{ needs.resolve-and-analyze.outputs.repo }}
+          ref: ${{ needs.resolve-and-analyze.outputs.head_sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: target
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Validate configured target without secrets
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          QUALITY_FILE: ${{ runner.temp }}/quality.json
+          CONFIG_FILE: ${{ github.workspace }}/config/repositories.yml
+        run: python ../scripts/quality/run.py
+        working-directory: target
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: central-pr-quality, path: '${{ runner.temp }}/quality.json', retention-days: 1 }
