@@ -11,30 +11,88 @@ from __future__ import annotations
 import os
 import shutil
 import sys
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from ..common.commands import CommandResult, run_commands, summarise, write_result
 from ..common.config import Command, Target, load_repositories, resolve_target
 from ..common.errors import AutomationError
 from ..quality.run import build_runner, write_command_summary
 
-#: tool -> (binary, command). Commands are central; target config only toggles them.
-SCANNERS: dict[str, tuple[str, str]] = {
-    "gitleaks": ("gitleaks", "gitleaks dir . --no-banner --redact --exit-code 1"),
-    "semgrep": ("semgrep", "semgrep scan --error --quiet --config auto ."),
-    "trivy": ("trivy", "trivy fs --quiet --exit-code 1 --scanners vuln,secret ."),
+#: tool -> (binary, probe, command). Commands are central; target config only
+#: toggles them. The probe exists because a scanner exits non-zero both when it
+#: finds secrets and when it is invoked wrongly — a CLI/version mismatch used to
+#: be reported as a security failure. The probe separates the two.
+SCANNERS: dict[str, tuple[str, str, str]] = {
+    "gitleaks": (
+        "gitleaks",
+        "gitleaks dir --help",
+        "gitleaks dir . --no-banner --redact --exit-code 1",
+    ),
+    "semgrep": (
+        "semgrep",
+        "semgrep --version",
+        "semgrep scan --error --quiet --config auto .",
+    ),
+    "trivy": (
+        "trivy",
+        "trivy --version",
+        "trivy fs --quiet --exit-code 1 --scanners vuln,secret .",
+    ),
 }
 
 
-def planned_scanners(target: Target, *, which=shutil.which) -> tuple[list[Command], list[CommandResult]]:
+def probe_scanners(
+    commands: Sequence[Command], *, cwd: str, runner=None, timeout: int = 120
+) -> tuple[list[Command], list[CommandResult]]:
+    """Split scanners into ones whose CLI works and ones that are unusable.
+
+    A scanner whose probe fails is recorded as ``error``, never as ``fail``: it
+    found nothing, so it must not read as a security finding.
+    """
+    usable: list[Command] = []
+    broken: list[CommandResult] = []
+    for command in commands:
+        entry = SCANNERS.get(command.name)
+        if entry is None:
+            usable.append(command)  # an extra command from config; nothing to probe
+            continue
+        _, probe, _ = entry
+        results = run_commands(
+            [Command(name=f"{command.name} probe", run=probe, group="security")],
+            cwd=cwd,
+            runner=runner,
+            timeout=timeout,
+        )
+        if results and results[0].status == "pass":
+            usable.append(command)
+            continue
+        tail = (results[0].output_tail if results else "").strip().splitlines()
+        broken.append(
+            CommandResult(
+                name=command.name,
+                group="security",
+                command=command.run,
+                status="error",
+                reason=(
+                    f"{command.name} does not support this invocation "
+                    f"({probe!r} failed): {tail[0] if tail else 'no output'}"
+                ),
+            )
+        )
+    return usable, broken
+
+
+def planned_scanners(target: Target, *, which=None) -> tuple[list[Command], list[CommandResult]]:
     """Split enabled scanners into runnable commands and not-run placeholders."""
+    # Resolved at call time so the lookup can be substituted in tests.
+    which = which or shutil.which
     config: Mapping[str, Any] = target.config.get("security") or {}
     runnable: list[Command] = []
     unavailable: list[CommandResult] = []
     for tool in sorted(SCANNERS):
         if not config.get(tool):
             continue
-        binary, command = SCANNERS[tool]
+        binary, _probe, command = SCANNERS[tool]
         if which(binary) is None:
             unavailable.append(
                 CommandResult(
@@ -98,13 +156,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
 
-    results = run_commands(runnable, cwd=workdir, runner=runner) + unavailable
+    # Verify each scanner's CLI before trusting its exit code.
+    usable, broken = probe_scanners(runnable, cwd=workdir, runner=runner)
+    results = run_commands(usable, cwd=workdir, runner=runner) + broken + unavailable
     payload = summarise(results)
     payload["sandbox"] = sandbox_info
     # A scanner that could not run must not read as a pass.
-    if payload["status"] == "pass" and any(r.status == "not_run" for r in results):
+    degraded = [r for r in results if r.status in ("not_run", "error")]
+    if payload["status"] != "fail" and degraded:
         payload["status"] = "partial"
-        payload["reason"] = "Some enabled scanners were not provisioned on the runner."
+        payload["reason"] = "; ".join(
+            r.reason or f"{r.name} did not run" for r in degraded
+        )[:500]
     write_result(result_file, payload)
 
     for item in results:

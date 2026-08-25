@@ -155,13 +155,23 @@ def summarise(results: Iterable[CommandResult]) -> dict[str, object]:
         return {"status": "not_run", "reason": "No commands are configured.", "results": []}
     failed = [item for item in items if item.status == "fail"]
     skipped = [item for item in items if item.status == "skipped"]
+    # An 'error' result is a tool that could not run. It must not be silently
+    # counted as a pass, but it is not a failing check either.
+    errored = [item for item in items if item.status == "error"]
+    if failed:
+        status = "fail"
+    elif errored or skipped:
+        status = "partial"
+    else:
+        status = "pass"
     return {
-        "status": "fail" if failed else "pass",
+        "status": status,
         "counts": {
             "total": len(items),
             "passed": sum(1 for item in items if item.status == "pass"),
             "failed": len(failed),
             "skipped": len(skipped),
+            "errored": len(errored),
         },
         "results": [asdict(item) for item in items],
     }

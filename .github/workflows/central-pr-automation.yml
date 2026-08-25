@@ -124,7 +124,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r requirements.txt
       - name: Mint a short-lived read token for the target repository
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
@@ -155,7 +155,7 @@ jobs:
           fi
       # Explicit file list. $RUNNER_TEMP is never uploaded as a whole.
       - name: Upload sanitised PR context
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: pr-automation-context
           retention-days: 1
@@ -166,7 +166,7 @@ jobs:
             ${{ runner.temp }}/pr-automation-artifacts/pr.diff
             ${{ runner.temp }}/pr-automation-artifacts/plan.json
       - name: Upload CODEOWNERS when present
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: steps.files.outputs.codeowners == 'true'
         with:
           name: pr-automation-codeowners
@@ -195,7 +195,7 @@ jobs:
           cache-dependency-path: requirements.txt
       - name: Install central dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           name: pr-automation-context
           path: ${{ runner.temp }}/pr-automation-artifacts
@@ -217,7 +217,7 @@ jobs:
             echo 'patch=false' >> "$GITHUB_OUTPUT"
           fi
       - name: Upload AI analysis
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: pr-automation-analysis
@@ -225,7 +225,7 @@ jobs:
           if-no-files-found: warn
           path: ${{ runner.temp }}/pr-automation-artifacts/analysis.json
       - name: Upload candidate patch
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: always() && steps.files.outputs.patch == 'true'
         with:
           name: pr-automation-candidate-patch
@@ -255,7 +255,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r requirements.txt
       - name: Mint a short-lived read token for the checkout
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
@@ -293,14 +293,14 @@ jobs:
           tar -czf "$RUNNER_TEMP/target-source.tar.gz" target
           echo "Packed $(du -h "$RUNNER_TEMP/target-source.tar.gz" | cut -f1) of target source."
       - name: Upload target source for isolated validation
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: pr-automation-target-source
           retention-days: 1
           if-no-files-found: error
           path: ${{ runner.temp }}/target-source.tar.gz
       - name: Upload merge conflict probe
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: needs.plan.outputs.needs_merge_probe == 'true'
         with:
           name: pr-automation-conflicts
@@ -330,11 +330,11 @@ jobs:
           cache-dependency-path: requirements.txt
       - name: Install central dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           name: pr-automation-context
           path: ${{ runner.temp }}/pr-automation-artifacts
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           name: pr-automation-conflicts
           path: ${{ runner.temp }}/pr-automation-artifacts
@@ -346,7 +346,7 @@ jobs:
           RESOLVE_ALLOWED_PATHS: ${{ toJSON(fromJSON(needs.plan.outputs.plan).resolve_allowed_paths) }}
         run: python -m scripts.ai.resolve
       - name: Upload resolution
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: pr-automation-resolution
@@ -389,7 +389,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r requirements.txt
       - uses: actions/setup-node@v5
         with: { node-version: '22' }
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v7
         with:
           name: pr-automation-target-source
           path: ${{ runner.temp }}/source
@@ -406,14 +406,14 @@ jobs:
           docker pull --quiet "$SANDBOX_IMAGE"
           docker image inspect "$SANDBOX_IMAGE" --format 'sandbox image: {{.Id}}'
       - name: Download the candidate patch
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         if: needs.plan.outputs.run_fix == 'true'
         continue-on-error: true
         with:
           name: pr-automation-candidate-patch
           path: ${{ runner.temp }}/pr-automation-artifacts
       - name: Download the candidate resolution
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         if: needs.plan.outputs.run_resolve_conflicts == 'true'
         continue-on-error: true
         with:
@@ -423,7 +423,7 @@ jobs:
         if: needs.plan.outputs.run_security == 'true'
         continue-on-error: true
         env:
-          GITLEAKS_VERSION: '8.18.4'
+          GITLEAKS_VERSION: '8.30.1'
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/bin"
@@ -468,7 +468,7 @@ jobs:
       # Only the result JSON files leave this job. Never the source, never a log
       # dump, never the runner temp directory.
       - name: Upload validation results
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: pr-automation-validation
@@ -478,7 +478,7 @@ jobs:
             ${{ runner.temp }}/pr-automation-artifacts/quality-result.json
             ${{ runner.temp }}/pr-automation-artifacts/security-result.json
       - name: Upload the validated patch
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: always() && needs.plan.outputs.needs_privileged_write == 'true'
         with:
           name: pr-automation-validated-patch
@@ -511,7 +511,7 @@ jobs:
       - name: Install central dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
       - name: Download PR context
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           name: pr-automation-context
           path: ${{ runner.temp }}/pr-automation-artifacts
@@ -519,21 +519,21 @@ jobs:
       # legitimately absent artifact is not surfaced as a red annotation.
       # continue-on-error stays as a backstop for a producer that died mid-upload.
       - name: Download CODEOWNERS
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         if: needs.resolve-target.outputs.has_codeowners == 'true'
         continue-on-error: true
         with:
           name: pr-automation-codeowners
           path: ${{ runner.temp }}/pr-automation-artifacts
       - name: Download AI analysis
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         if: needs.ai-analysis.result != 'skipped'
         continue-on-error: true
         with:
           name: pr-automation-analysis
           path: ${{ runner.temp }}/pr-automation-artifacts
       - name: Download validation results
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         if: needs.validate-target.result != 'skipped'
         continue-on-error: true
         with:
@@ -541,7 +541,7 @@ jobs:
           path: ${{ runner.temp }}/pr-automation-artifacts
       - name: Mint a short-lived write token for the target repository
         id: app-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
@@ -559,7 +559,7 @@ jobs:
           REVIEWERS_CONFIG: ${{ github.workspace }}/config/reviewers.yml
         run: python -m scripts.github.report
       - name: Upload the gate decision
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: pr-automation-gate
@@ -593,7 +593,7 @@ jobs:
       - name: Install central dependencies
         run: python -m pip install --disable-pip-version-check -r requirements.txt
       - name: Download the validated patch
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         continue-on-error: true
         with:
           name: pr-automation-validated-patch
@@ -617,7 +617,7 @@ jobs:
       - name: Mint a short-lived write token
         id: app-token
         if: steps.gate.outputs.proceed == 'true'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}

@@ -78,7 +78,27 @@ def test_a_lint_failure_does_not_stop_the_test_and_build_groups():
 def test_counts_are_reported():
     results = run_commands(ALL, runner=runner_for([0, 1, 0, 0]))
     counts = summarise(results)["counts"]
-    assert counts == {"total": 4, "passed": 3, "failed": 1, "skipped": 0}
+    assert counts == {"total": 4, "passed": 3, "failed": 1, "skipped": 0, "errored": 0}
+
+
+def test_a_skipped_command_makes_the_group_partial_not_pass():
+    # install fails -> the rest are skipped; that is not a pass.
+    results = run_commands(ALL, runner=runner_for([1]))
+    assert summarise(results)["status"] == "fail"
+
+
+def test_an_errored_tool_is_partial_not_pass():
+    from scripts.common.commands import CommandResult
+
+    payload = summarise(
+        [
+            CommandResult("semgrep", "security", "x", "pass", 0),
+            CommandResult("gitleaks", "security", "y", "error",
+                          reason="gitleaks does not support this invocation"),
+        ]
+    )
+    assert payload["status"] == "partial"
+    assert payload["counts"]["errored"] == 1
 
 
 def test_no_configured_commands_is_not_run_rather_than_pass():

@@ -185,9 +185,20 @@ def build_sections(
     else:
         status_map = {"pass": PASS, "fail": FAIL, "not_run": NOT_RUN,
                       "partial": PARTIAL, "error": ERROR}
+        scanners = [r for r in (security.get("results") or []) if isinstance(r, Mapping)]
+        # Always name the scanners responsible; a bare "FAIL" with no detail is
+        # unactionable, and was exactly what a mis-invoked scanner produced.
+        detail = str(security.get("reason") or "")
+        if not detail:
+            notable = [r for r in scanners if r.get("status") in ("fail", "error", "not_run")]
+            if notable:
+                detail = "; ".join(
+                    f"{r.get('name')}: {r.get('status')}" for r in notable
+                )
+            elif scanners:
+                detail = f"{len(scanners)} scanner(s) clean"
         sections.append(
-            Section("Security", status_map.get(str(security.get("status")), ERROR),
-                    str(security.get("reason") or ""))
+            Section("Security", status_map.get(str(security.get("status")), ERROR), detail)
         )
 
     # Quality groups.
