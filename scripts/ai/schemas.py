@@ -23,6 +23,7 @@ CATEGORIES = (
 )
 
 MAX_SUMMARY = 4000
+MAX_DESCRIPTION = 8000
 MAX_TITLE = 250
 MAX_FINDINGS = 50
 MAX_GAPS = 50
@@ -74,7 +75,11 @@ def _string_list(data: Mapping[str, Any], key: str, *, limit: int) -> list[str]:
 
 
 def validate_metadata(data: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate PR metadata. ``summary`` is mandatory: no summary, no write."""
+    """Validate PR metadata. ``summary`` is mandatory: no summary, no write.
+
+    Every other field is optional; a section with no content is simply omitted
+    from the rendered PR description rather than padded with placeholder text.
+    """
     if not isinstance(data, Mapping):
         raise SchemaError("Metadata output must be a JSON object.")
     breaking = data.get("breaking_change")
@@ -83,12 +88,21 @@ def validate_metadata(data: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "title": _text(data, "title", limit=MAX_TITLE),
         "summary": _text(data, "summary", limit=MAX_SUMMARY, required=True),
+        # A longer prose description; falls back to the summary when absent.
+        "description": _text(data, "description", limit=MAX_DESCRIPTION),
         "change_type": _enum(data, "change_type", CHANGE_TYPES, default="chore"),
         "risk": _enum(data, "risk", RISKS, default="medium"),
+        "risk_reason": _text(data, "risk_reason", limit=MAX_FIELD),
         "breaking_change": bool(breaking),
+        "breaking_change_details": _text(data, "breaking_change_details", limit=MAX_FIELD),
         "components": _string_list(data, "components", limit=30),
         "changes": _string_list(data, "changes", limit=40),
+        "release_notes": _string_list(data, "release_notes", limit=30),
         "recommended_testing": _string_list(data, "recommended_testing", limit=30),
+        "review_focus": _string_list(data, "review_focus", limit=20),
+        "migration_notes": _string_list(data, "migration_notes", limit=20),
+        "rollback": _text(data, "rollback", limit=MAX_FIELD),
+        "related_issues": _string_list(data, "related_issues", limit=20),
     }
 
 

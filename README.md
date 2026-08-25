@@ -125,7 +125,29 @@ not cover every file, never collapses into an overall `PASS`.
 
 ## What lands on the PR
 
-- **Body** — a managed `AI PR Summary` block; author-written text is preserved.
+- **Body** — a managed description block between two HTML markers. Author text
+  outside it is preserved verbatim; regenerating replaces only the block. It opens
+  with the description itself, not an "AI summary" banner. Sections:
+
+  | Section | Content |
+  | --- | --- |
+  | Description | the full what/why/how, in prose |
+  | Change Type | `feature` / `fix` / `refactor` / `documentation` / `chore` / `security` / `test` |
+  | Risk | level, icon, and *why* that level |
+  | Components | the modules or areas touched |
+  | Changes | itemised change list |
+  | Release Notes | changelog-ready lines ("Added…", "Fixed…") |
+  | Breaking Changes | always stated, `None.` included |
+  | Migration Notes | config, env var, data or deploy steps |
+  | Recommended Testing | what a reviewer should verify |
+  | Review Focus | the files or behaviours needing closest attention |
+  | Rollback | how to revert safely |
+  | Related Issues | references found in the PR text (never invented) |
+  | Change Stats | files, ±lines, commits — from the PR, not the model |
+
+  An empty section is omitted, never padded with `None`/`N/A`, so a one-line PR
+  gets a short block. Choose and order sections per repository with
+  `metadata.sections` in `config/repositories.yml`.
 - **Title** — replaced only when the human title is a placeholder (`update`,
   `fix`, `Update auth.py`, `wip`, a bare ticket ref…). A descriptive title such
   as `fix(auth): prevent refresh token reuse` is never touched. Configure with

@@ -9,6 +9,7 @@ are enabled in config but whose binary is not provisioned are reported as
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from typing import Any, Mapping, Sequence
@@ -23,10 +24,12 @@ from ..quality.run import build_runner, write_command_summary
 #: finds secrets and when it is invoked wrongly — a CLI/version mismatch used to
 #: be reported as a security failure. The probe separates the two.
 SCANNERS: dict[str, tuple[str, str, str]] = {
+    # --verbose prints each finding's file, line and rule. --redact keeps the
+    # secret value itself out of the log and out of every artifact.
     "gitleaks": (
         "gitleaks",
         "gitleaks dir --help",
-        "gitleaks dir . --no-banner --redact --exit-code 1",
+        "gitleaks dir . --no-banner --redact --verbose --exit-code 1",
     ),
     "semgrep": (
         "semgrep",
@@ -39,6 +42,37 @@ SCANNERS: dict[str, tuple[str, str, str]] = {
         "trivy fs --quiet --exit-code 1 --scanners vuln,secret .",
     ),
 }
+
+
+#: Scanner output lines that state a finding count, so the report can say "4
+#: leak(s)" instead of a bare "fail".
+_COUNT_PATTERNS = (
+    re.compile(r"leaks found:\s*(\d+)", re.IGNORECASE),
+    re.compile(r"(\d+)\s+finding", re.IGNORECASE),
+    re.compile(r"Total\s+detected\s+issues:\s*(\d+)", re.IGNORECASE),
+)
+
+
+def finding_count(output: str) -> int | None:
+    """Extract a finding count from scanner output, or None when unstated."""
+    for pattern in _COUNT_PATTERNS:
+        match = pattern.search(output or "")
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:  # pragma: no cover - guarded by the pattern
+                continue
+    return None
+
+
+def annotate_counts(results: Sequence[CommandResult]) -> None:
+    """Fold a scanner's finding count into its reason, in place."""
+    for item in results:
+        if item.status != "fail" or item.reason:
+            continue
+        count = finding_count(item.output_tail)
+        if count is not None:
+            item.reason = f"{count} finding(s) — see the job summary for file and rule"
 
 
 def probe_scanners(
@@ -159,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     # Verify each scanner's CLI before trusting its exit code.
     usable, broken = probe_scanners(runnable, cwd=workdir, runner=runner)
     results = run_commands(usable, cwd=workdir, runner=runner) + broken + unavailable
+    annotate_counts(results)
     payload = summarise(results)
     payload["sandbox"] = sandbox_info
     # A scanner that could not run must not read as a pass.

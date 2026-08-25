@@ -30,12 +30,13 @@ from ..common.labels import derive_labels, missing_labels
 from ..common.reviewers import resolve_reviewers
 from ..common.titles import title_decision
 from .api import GitHubClient
+from .body import SUMMARY_END, SUMMARY_START
+from .body import upsert as upsert_body
+from .body import valid_sections
 from .diffmap import parse_diff, split_anchored
 
 REPORT_MARKER = "<!-- pr-automation-report -->"
 REVIEW_MARKER = "<!-- ai-pr-review -->"
-SUMMARY_START = "<!-- ai-pr-summary:start -->"
-SUMMARY_END = "<!-- ai-pr-summary:end -->"
 CHECK_NAME = "PR Automation / Quality Gate"
 
 FINDING_KEY_PATTERN = re.compile(r"<!-- ai-finding:([0-9a-f]{16}) -->")
@@ -193,7 +194,7 @@ def build_sections(
             notable = [r for r in scanners if r.get("status") in ("fail", "error", "not_run")]
             if notable:
                 detail = "; ".join(
-                    f"{r.get('name')}: {r.get('status')}" for r in notable
+                    f"{r.get('name')}: {r.get('reason') or r.get('status')}" for r in notable
                 )
             elif scanners:
                 detail = f"{len(scanners)} scanner(s) clean"
@@ -348,26 +349,23 @@ def render_comment(
     )
 
 
-def upsert_summary(body: str, summary: str, metadata: Mapping[str, Any]) -> str:
-    """Replace the managed summary block, preserving author-written body text."""
-    import re
+def upsert_summary(
+    body: str,
+    summary: str,
+    metadata: Mapping[str, Any],
+    *,
+    context: Mapping[str, Any] | None = None,
+    sections: list[str] | None = None,
+) -> str:
+    """Replace the managed description block, preserving author-written text.
 
-    stripped = re.sub(
-        re.escape(SUMMARY_START) + r".*?" + re.escape(SUMMARY_END) + r"\s*",
-        "",
-        body or "",
-        flags=re.DOTALL,
-    ).rstrip()
-    change_type = metadata.get("change_type") or "unknown"
-    risk = metadata.get("risk") or "unknown"
-    testing = "\n".join(f"- {item}" for item in metadata.get("recommended_testing") or [])
-    block = (
-        f"{SUMMARY_START}\n## AI PR Summary\n\n{summary}\n\n"
-        f"**Change type:** {change_type}  \n**Risk:** {risk}\n"
-        + (f"\n**Recommended testing**\n{testing}\n" if testing else "")
-        + f"{SUMMARY_END}"
-    )
-    return f"{stripped}\n\n{block}" if stripped else block
+    Rendering lives in :mod:`scripts.github.body`; ``summary`` is used only as the
+    fallback description when the model returned no long-form description.
+    """
+    payload = dict(metadata)
+    if not (payload.get("description") or "").strip():
+        payload["description"] = summary
+    return upsert_body(body, payload, context, sections=sections)
 
 
 class Reporter:
@@ -416,9 +414,14 @@ class Reporter:
         return labels
 
     def update_metadata(
-        self, metadata: Mapping[str, Any], *, title_policy: str = "weak"
+        self,
+        metadata: Mapping[str, Any],
+        *,
+        title_policy: str = "weak",
+        context: Mapping[str, Any] | None = None,
+        sections: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Update the PR body, and the title when the human one is a placeholder."""
+        """Update the PR description, and the title when the human one is a placeholder."""
         summary = (metadata.get("summary") or "").strip()
         if not summary:
             # Never overwrite PR metadata with an empty AI result.
@@ -431,7 +434,11 @@ class Reporter:
         proposed_title = (metadata.get("title") or "").strip()
         replace, reason = title_decision(current_title, proposed_title, policy=title_policy)
 
-        payload: dict[str, Any] = {"body": upsert_summary(pr.get("body") or "", summary, metadata)}
+        payload: dict[str, Any] = {
+            "body": upsert_summary(
+                pr.get("body") or "", summary, metadata, context=context, sections=sections
+            )
+        }
         if replace:
             payload["title"] = proposed_title
         self.client.patch(f"{self._repo_path}/pulls/{self.number}", payload)
@@ -735,9 +742,12 @@ def main(argv: list[str] | None = None) -> int:
 
     metadata_outcome: dict[str, Any] = {}
     if plan.get("metadata") and data["metadata"]:
+        options = plan.get("metadata_options") or {}
         metadata_outcome = reporter.update_metadata(
             data["metadata"],
-            title_policy=str((plan.get("metadata_options") or {}).get("title_policy") or "weak"),
+            title_policy=str(options.get("title_policy") or "weak"),
+            context=context,
+            sections=valid_sections(options.get("sections")),
         )
 
     # Inline review comments, anchored only to lines that are genuinely in the diff.

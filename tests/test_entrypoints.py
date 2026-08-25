@@ -71,7 +71,8 @@ def test_plan_writes_outputs_and_the_plan_artifact(tmp_path, artifacts, monkeypa
     written = json.loads((artifacts / "plan.json").read_text(encoding="utf-8"))
     assert written["action"] == "all"
     assert written["fix_allowed_paths"] == ["backend/**"]
-    assert written["metadata_options"] == {"title_policy": "weak"}
+    assert written["metadata_options"]["title_policy"] == "weak"
+    assert written["metadata_options"]["sections"][0] == "description"
     assert written["inline_comments"] is True
     # The plan output must be parseable by fromJSON() in the workflow.
     assert json.loads(values["plan"])["owner"] == "mycompany"

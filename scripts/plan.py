@@ -21,6 +21,7 @@ from .common.config import (
 )
 from .common.dispatch import plan as build_plan
 from .common.errors import AutomationError
+from .github import body
 
 TITLE_POLICIES = ("weak", "always", "never")
 DEFAULT_TITLE_POLICY = "weak"
@@ -110,7 +111,16 @@ def main(argv: list[str] | None = None) -> int:
             f"falling back to {DEFAULT_TITLE_POLICY!r}."
         )
         policy = DEFAULT_TITLE_POLICY
-    execution["metadata_options"] = {"title_policy": policy}
+    sections = body.valid_sections(metadata_config.get("sections"))
+    if metadata_config.get("sections") and sections is None:
+        print(
+            "::warning::metadata.sections lists no recognised section names; "
+            "using the default description layout."
+        )
+    execution["metadata_options"] = {
+        "title_policy": policy,
+        "sections": sections or list(body.DEFAULT_SECTIONS),
+    }
 
     review_config = target.config.get("review") or {}
     execution["inline_comments"] = bool(review_config.get("inline_comments", True))

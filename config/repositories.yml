@@ -48,6 +48,26 @@ repositories:
       # always replace whenever the AI proposes something different
       # never  never touch the title
       title_policy: weak
+      # Sections of the managed PR description block, in order. Remove any you do
+      # not want. An empty section is omitted automatically, so listing one costs
+      # nothing when the PR has nothing to say for it.
+      #   description  change_type  risk       components  changes
+      #   release_notes  breaking   migration  testing     review_focus
+      #   rollback     related_issues  stats
+      sections:
+        - description
+        - change_type
+        - risk
+        - components
+        - changes
+        - release_notes
+        - breaking
+        - migration
+        - testing
+        - review_focus
+        - rollback
+        - related_issues
+        - stats
     review:
       inline_comments: true
     # Container isolation for target-controlled commands. The validation job holds

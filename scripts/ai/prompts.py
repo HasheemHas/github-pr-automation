@@ -52,15 +52,38 @@ def metadata_prompt(context: Mapping[str, Any], diff: str, *, partial: bool = Fa
         else ""
     )
     return (
-        "Summarise this pull request for reviewers.\n"
+        "Write the pull request description a reviewer and a release manager both "
+        "need.\n"
         f"{note}"
         "Write a title a reviewer could act on: a conventional-commit style header "
         "naming the component and the actual change, never a placeholder like "
         '"update" or "fix".\n'
-        'Return JSON: {"title": string, "summary": string, "change_type": one of '
-        "feature|fix|refactor|documentation|chore|security|test, "
-        '"risk": one of low|medium|high, "breaking_change": boolean, '
-        '"components": [string], "changes": [string], "recommended_testing": [string]}\n'
+        "Ground every statement in the diff. Leave a field empty rather than "
+        "guessing; empty fields are omitted from the description, so an invented "
+        "one is worse than a missing one.\n"
+        "Return JSON with these keys:\n"
+        '  "title": string — conventional-commit style header\n'
+        '  "summary": string — one or two sentences, the change in a nutshell\n'
+        '  "description": string — the full description: what changed, why, and how. '
+        "Markdown paragraphs allowed. For a trivial change, one short paragraph.\n"
+        '  "change_type": one of feature|fix|refactor|documentation|chore|security|test\n'
+        '  "risk": one of low|medium|high\n'
+        '  "risk_reason": string — why that risk level, naming the blast radius\n'
+        '  "breaking_change": boolean\n'
+        '  "breaking_change_details": string — what breaks and for whom; empty if none\n'
+        '  "components": [string] — the modules, services or areas touched\n'
+        '  "changes": [string] — itemised changes, one line each\n'
+        '  "release_notes": [string] — user-facing changelog lines written for a '
+        'release note, each starting with a verb like "Added", "Fixed", "Changed", '
+        '"Removed" or "Deprecated". Empty for a purely internal change.\n'
+        '  "recommended_testing": [string] — what a reviewer should verify\n'
+        '  "review_focus": [string] — the specific files or behaviours needing the '
+        "closest attention\n"
+        '  "migration_notes": [string] — required config, env var, data or deploy '
+        "steps; empty if none\n"
+        '  "rollback": string — how to revert safely; empty if a plain revert suffices\n'
+        '  "related_issues": [string] — issue or ticket references found in the PR '
+        "text or commits; never invent one\n"
         f"UNTRUSTED CONTEXT: {_context_blob(context)}\n"
         f"UNTRUSTED DIFF:\n{diff[:DIFF_BUDGET]}\n"
     )

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from scripts.common.config import Command, Target
 from scripts.common.dispatch import plan as build_plan
 from scripts.github.report import ERROR, FAIL, PARTIAL, PASS, build_sections, overall
@@ -83,6 +85,72 @@ def test_an_extra_config_command_is_not_probed():
     usable, broken = security_run.probe_scanners([extra], cwd=".", runner=runner_for({}))
     assert [c.name for c in usable] == ["pip-audit"]
     assert broken == []
+
+
+def test_gitleaks_runs_verbosely_but_redacted():
+    _, _, command = security_run.SCANNERS["gitleaks"]
+    # --verbose names the file and rule; --redact keeps the secret value out of
+    # every log and artifact.
+    assert "--verbose" in command
+    assert "--redact" in command
+
+
+# -- finding counts --------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "output,expected",
+    [
+        ("INF scanned ~856030220 bytes in 9.63s\nWRN leaks found: 4", 4),
+        ("WRN leaks found: 1", 1),
+        ("leaks found: 0", 0),
+        ("12 findings in 3 files", 12),
+        ("Total detected issues: 7", 7),
+        ("no leaks found", None),
+        ("", None),
+    ],
+)
+def test_a_stated_finding_count_is_extracted(output, expected):
+    assert security_run.finding_count(output) == expected
+
+
+def test_the_count_is_folded_into_the_reason():
+    from scripts.common.commands import CommandResult
+
+    results = [
+        CommandResult("gitleaks", "security", "x", "fail", 1,
+                      output_tail="WRN leaks found: 4")
+    ]
+    security_run.annotate_counts(results)
+    assert "4 finding(s)" in results[0].reason
+    assert "job summary" in results[0].reason
+
+
+def test_an_existing_reason_is_not_overwritten():
+    from scripts.common.commands import CommandResult
+
+    results = [CommandResult("gitleaks", "security", "x", "error", reason="CLI mismatch")]
+    security_run.annotate_counts(results)
+    assert results[0].reason == "CLI mismatch"
+
+
+def test_a_passing_scanner_gets_no_count_reason():
+    from scripts.common.commands import CommandResult
+
+    results = [CommandResult("gitleaks", "security", "x", "pass", 0,
+                             output_tail="leaks found: 0")]
+    security_run.annotate_counts(results)
+    assert results[0].reason == ""
+
+
+def test_the_report_detail_carries_the_finding_count():
+    security = {
+        "status": "fail",
+        "results": [{"name": "gitleaks", "status": "fail",
+                     "reason": "4 finding(s) — see the job summary for file and rule"}],
+    }
+    sections, _ = build_sections(dict(build_plan("all")), None, None, security)
+    detail = {s.name: s for s in sections}["Security"].detail
+    assert "gitleaks: 4 finding(s)" in detail
 
 
 def test_every_declared_scanner_has_a_probe():

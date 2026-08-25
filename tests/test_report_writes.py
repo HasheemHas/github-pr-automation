@@ -146,7 +146,7 @@ def test_a_weak_title_is_replaced_on_the_pull_request():
     assert outcome["title_updated"] is True
     patch_body = [c for c in opener.calls if c[0] == "PATCH"][0][2]
     assert patch_body["title"] == "feat(auth): add refresh-token validation"
-    assert "AI PR Summary" in patch_body["body"]
+    assert "## Description" in patch_body["body"]
 
 
 def test_a_good_title_is_left_alone_but_the_body_is_still_updated():
@@ -164,7 +164,7 @@ def test_a_good_title_is_left_alone_but_the_body_is_still_updated():
     assert outcome["title_updated"] is False
     patch_body = [c for c in opener.calls if c[0] == "PATCH"][0][2]
     assert "title" not in patch_body
-    assert "AI PR Summary" in patch_body["body"]
+    assert "## Description" in patch_body["body"]
 
 
 def test_the_never_policy_leaves_a_placeholder_title_alone():
