@@ -16,7 +16,7 @@ from typing import Any, Mapping
 from ..common.commands import CommandResult, run_commands, summarise, write_result
 from ..common.config import Command, Target, load_repositories, resolve_target
 from ..common.errors import AutomationError
-from ..quality.run import build_runner
+from ..quality.run import build_runner, write_command_summary
 
 #: tool -> (binary, command). Commands are central; target config only toggles them.
 SCANNERS: dict[str, tuple[str, str]] = {
@@ -110,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     for item in results:
         print(f"{item.name}: {item.status.upper()}" + (f" ({item.reason})" if item.reason else ""))
     print(f"Security: {payload['status'].upper()}")
+
+    write_command_summary(
+        "🔐 Security scanners", results, payload, sandbox_info, groups=("security",)
+    )
     return 0 if payload["status"] in ("pass", "partial", "not_run") else 1
 
 

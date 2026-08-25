@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from ..common import sandbox as sandbox_module
+from ..common import summary
 from ..common.commands import run_commands, summarise, write_result
 from ..common.config import Target, commands_for, load_repositories, resolve_target
 from ..common.errors import AutomationError
@@ -30,6 +31,52 @@ def collect(target: Target) -> list:
     for group in GROUPS:
         commands.extend(commands_for(target, group))
     return commands
+
+
+def write_command_summary(title, results, payload, sandbox_info, *, groups=GROUPS) -> None:
+    """Render a command-by-command result table into the Actions job summary.
+
+    Shared by the quality and security runners so both read the same way.
+    """
+    status = str(payload.get("status", "not_run"))
+    blocks = [
+        summary.heading(f"{title} — {summary.icon(status)} {status.upper()}"),
+        summary.table(
+            ["Check", "Group", "Result", "Exit", "Note"],
+            [
+                [
+                    item.name,
+                    item.group,
+                    f"{summary.icon(item.status)} {item.status}",
+                    "—" if item.exit_code is None else item.exit_code,
+                    item.reason or "",
+                ]
+                for item in results
+            ],
+        ),
+    ]
+    if payload.get("reason"):
+        blocks.append(f"> [!NOTE]\n> {payload['reason']}")
+    blocks.append(
+        summary.definitions(
+            {
+                "Execution": (
+                    f"container `{sandbox_info['image']}`" if sandbox_info.get("ready")
+                    else f"host runner — {sandbox_info.get('reason', 'no sandbox')}"
+                ),
+                "Credentials in this job": "none",
+            }
+        )
+    )
+    # Failing commands get their output tail, so the run page explains the failure.
+    for item in results:
+        if item.status == "fail" and item.output_tail:
+            blocks.append(
+                summary.details(
+                    f"Output — {item.name}", f"```text\n{item.output_tail[-3000:]}\n```"
+                )
+            )
+    summary.write(*blocks)
 
 
 def build_runner(target: Target, workdir: str, *, require_sandbox: bool = False):
@@ -120,6 +167,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{item.name}: {item.status.upper()}")
     print(f"Sandbox: {'container ' + sandbox_info['image'] if sandbox_info['ready'] else 'host'}")
     print(f"Quality: {payload['status'].upper()}")
+
+    write_command_summary(
+        "🔍 Quality validation", results, payload, sandbox_info, groups=GROUPS
+    )
     # A non-zero exit records the failure for this job; the report job reads the
     # JSON, so a failure here never hides the detail.
     return 0 if payload["status"] == "pass" else 1

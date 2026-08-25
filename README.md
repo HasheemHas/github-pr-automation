@@ -139,6 +139,22 @@ not cover every file, never collapses into an overall `PASS`.
 - **Labels**, **reviewer requests**, one **report comment**, and the
   `PR Automation / Quality Gate` **check run** on the target head SHA.
 
+## Actions run summaries
+
+Every job writes a `$GITHUB_STEP_SUMMARY` block, so the run page tells the whole
+story without opening the logs or the PR:
+
+| Job | Summary block |
+| --- | --- |
+| `plan` | target, action, which steps were requested, sandbox and title policy |
+| `resolve-target` | PR title, author, head/base, fork flag, file and line counts, test-file count, changed-file list |
+| `ai-analysis` | per-section status, both model IDs, the proposed title and summary, the findings table, batch coverage and any unreviewed files |
+| `validate-target` | a PASS/FAIL/SKIPPED row per command, host-vs-container execution, and the output tail of each failing command |
+| `report-to-target` | the full gate table, severity counts, exactly what was written to the PR, findings, unanchorable findings, test gaps and notes |
+
+Missing `GITHUB_STEP_SUMMARY` is a no-op, so the scripts stay runnable locally,
+and a summary write failure can never fail a job.
+
 ## Large pull requests
 
 The review splits the diff by file, splits oversized files by hunk, packs the

@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
+from ..common import summary
 from ..common.config import artifact_dir
 from ..common.errors import AutomationError, GitHubError, LimitExceeded
 from ..common.globs import matching_paths
@@ -270,6 +271,36 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Resolved {full_repo}#{number} at {context['head_sha']} "
           f"({len(context['files'])} changed files, "
           f"{len(context['repository_tests'])} test file(s) in the repository).")
+
+    inv = context["test_inventory"]
+    summary.write(
+        summary.heading("📥 Pull request resolved"),
+        summary.definitions(
+            {
+                "PR": f"[{full_repo}#{number}](https://github.com/{full_repo}/pull/{number})",
+                "Title": context["title"] or "_none_",
+                "Author": f"@{context['author']}" if context["author"] else "_unknown_",
+                "Head": f"`{context['head_sha'][:12]}` on `{context['head_ref']}`",
+                "Base": f"`{context['base_ref']}`",
+                "From fork": "yes (writes to git are disabled)" if context["from_fork"] else "no",
+                "Draft": "yes" if context["draft"] else "no",
+                "Mergeable state": context["mergeable_state"] or "unknown",
+                "Changed files": len(context["files"]),
+                "Lines": f"+{context['additions'] or 0} / -{context['deletions'] or 0}",
+                "Commits": len(context["commits"]),
+                "Diff size": f"{len(diff):,} chars",
+                "CODEOWNERS": "present" if codeowners is not None else "absent",
+                "Test files in repository": (
+                    f"{inv.get('test_count', 0)} of {inv.get('total_files', 0)} tracked files"
+                    + (" (list truncated)" if inv.get("truncated") else "")
+                ),
+            }
+        ),
+        summary.details(
+            f"Changed files ({len(context['files'])})",
+            summary.bullets((f"`{p}`" for p in context["files"]), limit=50),
+        ),
+    )
     return 0
 
 

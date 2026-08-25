@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from ..common import summary
 from ..common.config import artifact_dir, reviewer_groups
 from ..common.errors import AutomationError, GitHubError
 from ..common.labels import derive_labels, missing_labels
@@ -578,6 +579,104 @@ class Reporter:
         )
 
 
+def write_gate_summary(
+    full_name: str,
+    number: int,
+    sections: list[Section],
+    data: Mapping[str, Any],
+    verdict: str,
+    labels: list[str],
+    reviewers: Mapping[str, Any],
+    metadata_outcome: Mapping[str, Any],
+    inline_outcome: Mapping[str, Any],
+    unanchored: list[Mapping[str, Any]],
+    notes: list[str],
+) -> None:
+    """Render the whole gate into the Actions job summary."""
+    counts = data["counts"]
+    pr_link = f"https://github.com/{full_name}/pull/{number}"
+    blocks = [
+        summary.heading(f"{summary.icon(verdict)} Quality Gate: {verdict}"),
+        summary.definitions(
+            {"Pull request": f"[{full_name}#{number}]({pr_link})", "Check run": f"`{CHECK_NAME}`"}
+        ),
+        summary.table(
+            ["Check", "Status", "Detail"],
+            [[s.name, f"{summary.icon(s.status)} {s.status}", s.detail] for s in sections],
+        ),
+        summary.table(
+            ["Critical", "High", "Medium", "Low/Info", "Test gaps"],
+            [[counts["critical"], counts["high"], counts["medium"], counts["low"],
+              len(data["gaps"])]],
+        ),
+    ]
+
+    written = {
+        "Labels": ", ".join(f"`{x}`" for x in labels) or "none",
+        "Title": (
+            f"replaced → `{metadata_outcome.get('new_title')}`"
+            if metadata_outcome.get("title_updated")
+            else f"unchanged — {metadata_outcome.get('title_reason') or 'not requested'}"
+        ),
+        "Body": "AI summary block written" if metadata_outcome.get("body_updated") else "unchanged",
+        "Reviewers": (
+            "deferred to CODEOWNERS" if reviewers.get("deferred_to_codeowners")
+            else ", ".join(
+                [f"@{u}" for u in reviewers.get("users") or []]
+                + [f"@{t}" for t in reviewers.get("teams") or []]
+            ) or "none requested"
+        ),
+        "Inline comments": (
+            f"{inline_outcome.get('posted', 0)} posted"
+            + (f", {inline_outcome.get('skipped_existing', 0)} already present"
+               if inline_outcome.get("skipped_existing") else "")
+            + (f", {inline_outcome.get('rejected', 0)} rejected"
+               if inline_outcome.get("rejected") else "")
+            + (f", {len(unanchored)} not anchorable" if unanchored else "")
+        ),
+    }
+    blocks.append(summary.heading("Written to the pull request", 3))
+    blocks.append(summary.definitions(written))
+
+    findings = data["findings"]
+    if findings:
+        blocks.append(
+            summary.details(
+                f"Findings ({len(findings)})",
+                summary.table(
+                    ["Severity", "File", "Line", "Finding"],
+                    [
+                        [f["severity"], f"`{f.get('path') or '—'}`", f.get("line") or "—",
+                         f["title"]]
+                        for f in findings[:40]
+                    ],
+                ),
+                open_by_default=verdict == FAIL,
+            )
+        )
+    if unanchored:
+        blocks.append(
+            summary.details(
+                f"Findings not anchorable to a diff line ({len(unanchored)})",
+                summary.bullets(
+                    f"`{f.get('path') or '—'}`:{f.get('line') or '—'} — {f.get('title')} "
+                    f"({f.get('unanchored_reason')})"
+                    for f in unanchored
+                ),
+            )
+        )
+    if data["gaps"]:
+        blocks.append(
+            summary.details(f"Potential test gaps ({len(data['gaps'])})",
+                            summary.bullets(data["gaps"]))
+        )
+    if notes:
+        blocks.append(summary.details(f"Notes ({len(notes)})", summary.bullets(notes, limit=30)))
+
+    blocks.append("_Human approval is still required before merge._")
+    summary.write(*blocks)
+
+
 def main(argv: list[str] | None = None) -> int:
     env = os.environ
     out_dir = Path(env.get("RESULT_DIR") or artifact_dir(env))
@@ -708,6 +807,11 @@ def main(argv: list[str] | None = None) -> int:
         "notes": reporter.notes,
     }
     (out_dir / "gate.json").write_text(json.dumps(gate, indent=2) + "\n", encoding="utf-8")
+
+    write_gate_summary(
+        f"{owner}/{repo}", number, sections, data, verdict, labels, reviewers,
+        metadata_outcome, inline_outcome, unanchored, reporter.notes,
+    )
 
     for section in sections:
         print(f"{section.name}: {section.status}")

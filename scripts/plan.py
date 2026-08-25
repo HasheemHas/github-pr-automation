@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-from .common import sandbox
+from .common import sandbox, summary
 from .common.config import (
     DEFAULT_REPOSITORIES_CONFIG,
     artifact_dir,
@@ -24,6 +24,19 @@ from .common.errors import AutomationError
 
 TITLE_POLICIES = ("weak", "always", "never")
 DEFAULT_TITLE_POLICY = "weak"
+
+#: Order the steps are listed in the job summary.
+STEP_ORDER = (
+    "metadata",
+    "labels",
+    "reviewers",
+    "review",
+    "security",
+    "quality",
+    "tests",
+    "fix",
+    "resolve_conflicts",
+)
 
 #: Paths an AI-authored patch may never touch, whatever the target config says.
 FORBIDDEN_FIX_PATHS = (
@@ -149,6 +162,36 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"Action '{execution['action']}' -> steps: {', '.join(execution['steps'])}")
     print(f"Target: {target.full_name}")
+
+    summary.write(
+        summary.heading("🧭 Plan"),
+        summary.definitions(
+            {
+                "Target": f"`{target.full_name}` PR #{env.get('TARGET_PR_NUMBER', '?')}",
+                "Action": f"`{execution['action']}`",
+                "Steps": ", ".join(f"`{step}`" for step in execution["steps"]),
+            }
+        ),
+        summary.table(
+            ["Step", "Requested"],
+            [
+                [step.replace("_", "-"), summary.icon("PASS" if execution[step] else "NOT RUN")]
+                for step in STEP_ORDER
+            ],
+        ),
+        summary.definitions(
+            {
+                "AI required": "yes" if execution["needs_ai"] else "no",
+                "Target checkout required": "yes" if execution["needs_target_source"] else "no",
+                "Writes to git": "yes" if execution["needs_privileged_write"] else "no",
+                "Sandbox": (
+                    f"`{sandbox_config.image}`" if sandbox_config.usable
+                    else "not configured (required for `fix` / `resolve-conflicts`)"
+                ),
+                "Title policy": f"`{policy}`",
+            }
+        ),
+    )
     return 0
 
 

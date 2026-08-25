@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from ..common import summary
 from ..common.config import artifact_dir
 from ..common.errors import AIError
 from . import prompts
@@ -254,6 +255,86 @@ def analyse(
     return result
 
 
+def write_summary(result: Mapping[str, Any]) -> None:
+    """Render the AI outcome into the Actions job summary."""
+    rows = []
+    for key, label in (
+        ("metadata", "Metadata"),
+        ("review", "Review"),
+        ("tests", "Test-gap analysis"),
+        ("fix", "Fix patch"),
+    ):
+        entry = result.get(key)
+        if not isinstance(entry, Mapping):
+            continue
+        status = str(entry.get("status"))
+        detail = str(entry.get("error") or entry.get("reason") or "")
+        data = entry.get("data") or {}
+        if status == "ok" and key == "review":
+            detail = (
+                f"{len(data.get('findings') or [])} finding(s) across "
+                f"{data.get('succeeded_batches', data.get('batches', 1))}/"
+                f"{data.get('batches', 1)} batch(es)"
+            )
+            if data.get("complete") is False:
+                detail += f"; {len(data.get('unreviewed_paths') or [])} file(s) NOT reviewed"
+        elif status == "ok" and key == "tests":
+            detail = f"{len(data.get('gaps') or [])} potential gap(s)"
+        elif status == "ok" and key == "metadata":
+            detail = f"risk `{data.get('risk')}`, type `{data.get('change_type')}`"
+        rows.append([label, f"{summary.icon(status)} {status}", detail])
+
+    blocks = [summary.heading("🤖 AI analysis"), summary.table(["Section", "Status", "Detail"], rows)]
+
+    models = result.get("models") or {}
+    blocks.append(
+        summary.definitions(
+            {"Metadata model": f"`{models.get('metadata')}`",
+             "Review model": f"`{models.get('review')}`"}
+        )
+    )
+
+    metadata = (result.get("metadata") or {}).get("data") or {}
+    if metadata.get("summary"):
+        blocks.append(
+            summary.details(
+                "Proposed summary",
+                f"**Title:** `{metadata.get('title') or '—'}`\n\n{metadata['summary']}\n\n"
+                + summary.bullets(metadata.get("changes") or [], empty="_no itemised changes_"),
+                open_by_default=True,
+            )
+        )
+
+    review = (result.get("review") or {}).get("data") or {}
+    findings = review.get("findings") or []
+    if findings:
+        blocks.append(
+            summary.details(
+                f"Findings ({len(findings)})",
+                summary.table(
+                    ["Severity", "File", "Line", "Finding"],
+                    [
+                        [f["severity"], f"`{f.get('path') or '—'}`", f.get("line") or "—", f["title"]]
+                        for f in findings[:40]
+                    ],
+                ),
+                open_by_default=True,
+            )
+        )
+    unreviewed = review.get("unreviewed_paths") or []
+    if unreviewed:
+        blocks.append(
+            "> [!WARNING]\n> These files were **not** reviewed: "
+            + ", ".join(f"`{p}`" for p in unreviewed[:20])
+        )
+
+    gaps = ((result.get("tests") or {}).get("data") or {}).get("gaps") or []
+    if gaps:
+        blocks.append(summary.details(f"Potential test gaps ({len(gaps)})", summary.bullets(gaps)))
+
+    summary.write(*blocks)
+
+
 def main(argv: list[str] | None = None) -> int:
     env = os.environ
     out_dir = artifact_dir(env)
@@ -280,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sections = {k: v.get("status") for k, v in result.items() if isinstance(v, dict) and "status" in v}
     print("AI sections: " + (json.dumps(sections) if sections else "none requested"))
+    write_summary(result)
     # Section failures are reported, not fatal: the report job renders them as
     # "NOT RUN" and leaves the target PR untouched for those sections.
     return 0
