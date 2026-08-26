@@ -93,6 +93,52 @@ repositories:
       - frontend/src/**
       - admin/src/**
 
+  ecommerce-main:
+    enabled: true
+    type: php
+    commands:
+      install:
+        - name: Composer dependencies
+          run: composer install --no-interaction --no-progress --prefer-dist --working-dir=backend
+        - name: AI microservice dependencies
+          run: >-
+            sh -c 'if [ -f backend/ai_microservice/requirements.txt ];
+            then python3 -m pip install --disable-pip-version-check
+            -r backend/ai_microservice/requirements.txt;
+            else echo "no python requirements"; fi'
+      lint:
+        # php -l exits non-zero per file; xargs propagates that as 123.
+        - name: PHP syntax
+          run: >-
+            sh -c 'find . -path ./vendor -prune -o -name "*.php" -print0
+            | xargs -0 -r -n1 -P4 php -l > /dev/null'
+        - name: Python syntax
+          run: >-
+            python3 -c "import pathlib;
+            [compile(p.read_bytes(), str(p), 'exec')
+             for p in pathlib.Path('.').rglob('*.py')
+             if 'vendor' not in p.parts]"
+      # No PHPUnit configuration in the repository yet, so tests report NOT RUN
+      # rather than silently passing. Add a phpunit entry once one exists.
+      test: []
+      build: []
+    security:
+      # This repository is public, so a committed secret is exposed to everyone.
+      gitleaks: true
+      semgrep: false
+      trivy: false
+    metadata:
+      title_policy: weak
+    review:
+      inline_comments: true
+    sandbox:
+      enabled: false
+      image: ''
+    # Auto-fix stays off until a sandbox image is configured; both lists empty
+    # means action=fix is refused for this repository.
+    fix_allowed_paths: []
+    resolve_allowed_paths: []
+
   # Example. Set enabled: true only after the GitHub App is installed there.
   yshrms-api:
     enabled: false
