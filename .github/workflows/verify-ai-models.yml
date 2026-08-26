@@ -33,4 +33,5 @@ jobs:
           AI_BASE_URL: ${{ vars.AI_BASE_URL }}
           AI_METADATA_MODEL: ${{ vars.AI_METADATA_MODEL }}
           AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          AI_MAX_TOKENS: ${{ vars.AI_MAX_TOKENS }}
         run: python -m scripts.ai.check_models

@@ -210,6 +210,7 @@ jobs:
           AI_BASE_URL: ${{ vars.AI_BASE_URL }}
           AI_METADATA_MODEL: ${{ vars.AI_METADATA_MODEL }}
           AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          AI_MAX_TOKENS: ${{ vars.AI_MAX_TOKENS }}
           PR_AUTOMATION_PLAN: ${{ needs.plan.outputs.plan }}
         run: python -m scripts.ai.analyze
       - name: Detect a candidate patch
@@ -348,6 +349,7 @@ jobs:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           AI_BASE_URL: ${{ vars.AI_BASE_URL }}
           AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          AI_MAX_TOKENS: ${{ vars.AI_MAX_TOKENS }}
           RESOLVE_ALLOWED_PATHS: ${{ toJSON(fromJSON(needs.plan.outputs.plan).resolve_allowed_paths) }}
         run: python -m scripts.ai.resolve
       - name: Upload resolution

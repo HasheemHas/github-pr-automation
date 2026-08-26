@@ -94,6 +94,7 @@ and two Android Gradle builds — correct, but not what you want on every PR.
 | `AI_BASE_URL` | no | Overrides `https://integrate.api.nvidia.com/v1` |
 | `AI_METADATA_MODEL` | no | Overrides `nvidia/nemotron-3.5-lightning-30b-a3b` |
 | `AI_REVIEW_MODEL` | no | Overrides `nvidia/nemotron-3.5-lightning-30b-a3b` (review, test-gap analysis and patches) |
+| `AI_MAX_TOKENS` | no | Output-token budget per request, default `8192`. Raise it if a reasoning model runs out of room before emitting its JSON |
 
 `TARGET_ORG` is not `GITHUB_ORG`: GitHub reserves the `GITHUB_` prefix and will
 not let you create a variable with that name.
