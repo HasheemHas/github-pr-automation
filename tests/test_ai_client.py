@@ -24,7 +24,7 @@ class Rejected(Exception):
 def test_defaults_are_the_intended_production_values():
     assert ai_client.base_url({}) == "https://integrate.api.nvidia.com/v1"
     assert ai_client.metadata_model({}) == "nvidia/nemotron-3.5-lightning-30b-a3b"
-    assert ai_client.review_model({}) == "deepseek-ai/deepseek-v4-flash-0731"
+    assert ai_client.review_model({}) == "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 
 def test_every_default_is_overridable():

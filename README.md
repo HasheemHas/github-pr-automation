@@ -93,7 +93,7 @@ and two Android Gradle builds — correct, but not what you want on every PR.
 | `TARGET_ORG` | yes | Owner of the target repositories, e.g. `mycompany` |
 | `AI_BASE_URL` | no | Overrides `https://integrate.api.nvidia.com/v1` |
 | `AI_METADATA_MODEL` | no | Overrides `nvidia/nemotron-3.5-lightning-30b-a3b` |
-| `AI_REVIEW_MODEL` | no | Overrides `deepseek-ai/deepseek-v4-flash-0731` |
+| `AI_REVIEW_MODEL` | no | Overrides `nvidia/nemotron-3.5-lightning-30b-a3b` (review, test-gap analysis and patches) |
 
 `TARGET_ORG` is not `GITHUB_ORG`: GitHub reserves the `GITHUB_` prefix and will
 not let you create a variable with that name.

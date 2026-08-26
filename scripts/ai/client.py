@@ -18,7 +18,8 @@ from ..common.errors import AIError
 
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_METADATA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
-DEFAULT_REVIEW_MODEL = "deepseek-ai/deepseek-v4-flash-0731"
+# Review, test-gap analysis and patch generation all use this model.
+DEFAULT_REVIEW_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
 
 #: Substrings that indicate the model/provider rejected structured-output mode
 #: rather than rejecting our prompt.
