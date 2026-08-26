@@ -15,7 +15,13 @@ import sys
 from typing import Any, Mapping, Sequence
 
 from ..common.commands import CommandResult, run_commands, summarise, write_result
-from ..common.config import Command, Target, load_repositories, resolve_target
+from ..common.config import (
+    Command,
+    Target,
+    load_defaults,
+    load_repositories,
+    resolve_target,
+)
 from ..common.errors import AutomationError
 from ..quality.run import build_runner, write_command_summary
 
@@ -167,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
             repository,
             env={"TARGET_ORG": env.get("TARGET_ORG") or "validation-only"},
             repositories=load_repositories(config_file),
+            defaults=load_defaults(config_file),
         )
         runnable, unavailable = planned_scanners(target)
     except AutomationError as exc:

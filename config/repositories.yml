@@ -1,12 +1,47 @@
-# Central allowlist of target repositories.
+# Central configuration for target repositories.
 #
 # Repository names are relative to the TARGET_ORG Actions variable, so
 # TARGET_ORG=mycompany plus repository=yshrm resolves to mycompany/yshrm.
 #
-# Add a repository only after the GitHub App is installed on it, then set
-# enabled: true. Commands run in a credential-free job against the target's PR
-# head, so they may execute target-authored code; never add a command that needs
-# a secret.
+# Resolution order for any dispatched repository:
+#   1. an explicit entry under `repositories:` merged over `defaults:`
+#   2. otherwise `defaults:` alone, when defaults.enabled is true
+#   3. otherwise a hard failure in the `plan` job, before any token is minted
+#
+# So with defaults.enabled: true you can point the pipeline at ANY repository in
+# the organisation without editing this file. The GitHub App installation is
+# still the real authorisation boundary: a repository the App is not installed on
+# fails at token minting regardless of what this file says.
+#
+# Commands run in a credential-free job against the target's PR head and may
+# execute target-authored code, so never add a command that needs a secret.
+
+defaults:
+  # true  = any repository in TARGET_ORG may be targeted, using this profile
+  # false = every repository must have an explicit entry below (strict allowlist)
+  enabled: true
+  # Repositories that may never be targeted, even with enabled: true.
+  deny: []
+  security:
+    gitleaks: true
+    semgrep: false
+    trivy: false
+  metadata:
+    title_policy: weak
+  review:
+    inline_comments: true
+  sandbox:
+    enabled: false
+    image: ''
+  # Auto-fix stays off by default: `action=fix` needs both a sandbox image and a
+  # non-empty allowlist, so an unconfigured repository can never be written to.
+  fix_allowed_paths: []
+  resolve_allowed_paths: []
+  # No `commands:` here on purpose. A repository with no explicit commands gets
+  # them auto-detected from its own manifests (package.json, composer.json,
+  # requirements.txt, go.mod, Cargo.toml, Gemfile, pom.xml, *.csproj) by
+  # scripts/common/detect.py. Declare commands below only to override detection.
+
 repositories:
   yshrm:
     enabled: true

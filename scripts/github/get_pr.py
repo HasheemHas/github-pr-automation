@@ -20,6 +20,7 @@ from typing import Any, Mapping
 
 from ..common import summary
 from ..common.config import artifact_dir
+from ..common.detect import detect
 from ..common.errors import AutomationError, GitHubError, LimitExceeded
 from ..common.globs import matching_paths
 from .api import GitHubClient
@@ -171,28 +172,57 @@ def fetch_diff(client: GitHubClient, full_repo: str, number: int, max_bytes: int
     return diff
 
 
-def fetch_test_inventory(
-    client: GitHubClient, full_repo: str, ref: str, limit: int = DEFAULT_MAX_TEST_FILES
-) -> dict[str, Any]:
-    """Inventory every test file in the target tree at ``ref``.
-
-    One recursive tree read, no checkout and no code execution. Test-gap analysis
-    was previously filtering the PR's own changed files, so a PR that touched no
-    test file was told the repository had no tests at all.
-    """
+def fetch_tree(client: GitHubClient, full_repo: str, ref: str) -> dict[str, Any]:
+    """Read the recursive tree once; both test discovery and stack detection use it."""
     try:
         tree = client.get(f"/repos/{full_repo}/git/trees/{ref}?recursive=1")
     except GitHubError as exc:
-        return {"tests": [], "total_files": 0, "truncated": False,
+        return {"paths": [], "truncated": False,
                 "error": f"Could not read the repository tree (HTTP {exc.status})."}
+    return {
+        "paths": [
+            entry.get("path", "")
+            for entry in (tree or {}).get("tree") or []
+            if isinstance(entry, dict) and entry.get("type") == "blob"
+        ],
+        "truncated": bool((tree or {}).get("truncated")),
+    }
 
-    entries = [
-        entry.get("path", "")
-        for entry in (tree or {}).get("tree") or []
-        if isinstance(entry, dict) and entry.get("type") == "blob"
-    ]
+
+def detect_stack(
+    client: GitHubClient, full_repo: str, ref: str, paths: list[str]
+) -> dict[str, Any]:
+    """Derive validation commands from the tree, reading only manifest files."""
+
+    def read_file(path: str) -> str | None:
+        try:
+            return client.get_text(
+                f"/repos/{full_repo}/contents/{path}?ref={ref}",
+                accept="application/vnd.github.raw",
+            )
+        except GitHubError:
+            return None
+
+    return detect(paths, read_file)
+
+
+def fetch_test_inventory(
+    client: GitHubClient, full_repo: str, ref: str, limit: int = DEFAULT_MAX_TEST_FILES,
+    tree: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Inventory every test file in the target tree at ``ref``.
+
+    No checkout and no code execution. Test-gap analysis was previously filtering
+    the PR's own changed files, so a PR that touched no test file was told the
+    repository had no tests at all.
+    """
+    payload = dict(tree) if tree is not None else fetch_tree(client, full_repo, ref)
+    if payload.get("error"):
+        return {"tests": [], "total_files": 0, "truncated": False, "error": payload["error"]}
+
+    entries = payload.get("paths") or []
     tests = matching_paths(TEST_PATTERNS, entries)
-    truncated_tree = bool((tree or {}).get("truncated"))
+    truncated_tree = bool(payload.get("truncated"))
     return {
         "tests": sorted(tests)[:limit],
         "total_files": len(entries),
@@ -235,12 +265,16 @@ def main(argv: list[str] | None = None) -> int:
         max_diff = _limit(env, "MAX_DIFF_BYTES", DEFAULT_MAX_DIFF_BYTES) or DEFAULT_MAX_DIFF_BYTES
         diff = fetch_diff(client, full_repo, number, max_diff)
         codeowners = fetch_codeowners(client, full_repo, context["base_sha"])
+        # One tree read serves both test discovery and stack detection.
+        tree = fetch_tree(client, full_repo, context["head_sha"])
         inventory = fetch_test_inventory(
             client,
             full_repo,
             context["head_sha"],
             _limit(env, "MAX_TEST_FILES", DEFAULT_MAX_TEST_FILES) or DEFAULT_MAX_TEST_FILES,
+            tree=tree,
         )
+        detection = detect_stack(client, full_repo, context["head_sha"], tree.get("paths") or [])
     except LimitExceeded as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 3
@@ -251,6 +285,13 @@ def main(argv: list[str] | None = None) -> int:
     context["has_codeowners"] = codeowners is not None
     context["repository_tests"] = inventory["tests"]
     context["test_inventory"] = {k: v for k, v in inventory.items() if k != "tests"}
+    context["detected_stack"] = detection["ecosystems"]
+
+    # Detected commands travel as their own artifact file; the validation job uses
+    # them only when the repository declares no commands of its own.
+    (out_dir / "detected-commands.json").write_text(
+        json.dumps(detection, indent=2) + "\n", encoding="utf-8"
+    )
     (out_dir / "pr-context.json").write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
     (out_dir / "changed-files.json").write_text(
         json.dumps({"files": context["files"], "count": len(context["files"])}, indent=2) + "\n",
@@ -294,7 +335,28 @@ def main(argv: list[str] | None = None) -> int:
                     f"{inv.get('test_count', 0)} of {inv.get('total_files', 0)} tracked files"
                     + (" (list truncated)" if inv.get("truncated") else "")
                 ),
+                "Detected stack": ", ".join(detection["ecosystems"]) or "none recognised",
+                "Detected commands": (
+                    f"{len(detection['commands'])} available as a fallback"
+                    + (" — partial coverage, see below" if detection["truncated"] else "")
+                ),
             }
+        ),
+        (
+            "> [!WARNING]\n> Stack detection did not cover everything:\n"
+            + "\n".join(f"> - {note}" for note in detection["notes"])
+            if detection["notes"]
+            else ""
+        ),
+        summary.details(
+            f"Detected commands ({len(detection['commands'])})",
+            summary.table(
+                ["Group", "Name", "Command", "Because"],
+                [
+                    [c["group"], c["name"], f"`{c['run']}`", c.get("reason", "")]
+                    for c in detection["commands"]
+                ],
+            ),
         ),
         summary.details(
             f"Changed files ({len(context['files'])})",

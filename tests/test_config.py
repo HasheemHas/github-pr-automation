@@ -121,10 +121,17 @@ def test_reviewers_config_in_this_repo_loads():
         assert isinstance(group["paths"], list) and group["paths"]
 
 
-def test_load_repositories_rejects_a_config_without_repositories(tmp_path):
+def test_a_config_with_no_repositories_block_is_valid(tmp_path):
+    # A defaults-only config is legitimate: every repository uses the profile.
     path = tmp_path / "r.yml"
-    path.write_text("other: {}\n", encoding="utf-8")
-    with pytest.raises(ConfigError, match="non-empty 'repositories' mapping"):
+    path.write_text("defaults: {enabled: true}\n", encoding="utf-8")
+    assert config.load_repositories(path) == {}
+
+
+def test_load_repositories_rejects_a_non_mapping_repositories_block(tmp_path):
+    path = tmp_path / "r.yml"
+    path.write_text("repositories:\n  - one\n  - two\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="'repositories' as a mapping"):
         config.load_repositories(path)
 
 

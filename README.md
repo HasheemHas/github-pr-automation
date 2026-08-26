@@ -23,6 +23,59 @@ Actions → **Central PR Automation** → Run workflow:
 `fix` and `resolve-conflicts` are never part of `all` and must be requested
 explicitly.
 
+## Which repositories it works on
+
+By default, **any repository in `TARGET_ORG`** — no per-repository entry needed.
+`config/repositories.yml` resolves a dispatched repository like this:
+
+```text
+explicit entry (merged over defaults)   →  use it
+no entry, defaults.enabled: true        →  use the defaults profile + detection
+no entry, defaults.enabled: false       →  fail in `plan`, before any token exists
+listed in defaults.deny                 →  always refused
+```
+
+Set `defaults.enabled: false` to go back to a strict allowlist.
+
+The GitHub App installation is still the real authorisation boundary: a
+repository the App is not installed on fails at token minting whatever this file
+says. And `action=fix` stays refused for an unconfigured repository, because it
+needs both a sandbox image and a non-empty `fix_allowed_paths`.
+
+### Auto-detected validation commands
+
+A repository that declares no `commands` gets them derived from its own manifests
+by [detect.py](scripts/common/detect.py) — one recursive tree read plus a handful
+of manifest files, over the API. No checkout, no execution.
+
+| Detected | Commands |
+| --- | --- |
+| `package.json` | `npm ci --ignore-scripts` (or `npm install` without a lockfile), then only the `lint` / `typecheck` / `test` / `build` scripts the manifest actually declares |
+| `requirements*.txt`, `*.py` | pip install, a `py_compile` syntax pass, and `pytest` only when test files exist |
+| `composer.json`, `*.php` | composer install, `php -l` over the tree (vendor pruned), phpunit when a config exists |
+| `go.mod` | `go vet`, `go build`, `go test` |
+| `Cargo.toml` | `cargo check`, `cargo test` |
+| `Gemfile` | `bundle install`, `rspec` when `spec/` exists |
+| `pom.xml` / `build.gradle` | `mvn verify` / `gradlew build` |
+| `*.sln` / `*.csproj` | `dotnet restore`, `build`, `test` |
+
+Deliberate properties:
+
+- **An npm script is only run when `package.json` declares it**, so you never get
+  a guaranteed-failing `npm run lint` on a repo that has no lint script.
+- **Explicit config always wins**, and declaring *any* command opts the
+  repository out of detection entirely — half-detected, half-declared command
+  sets would be unpredictable.
+- **Vendored paths are ignored**: `node_modules`, `vendor`, `dist`, `.venv`, and
+  friends never produce commands.
+- **Partial coverage is reported, never hidden.** Per-ecosystem and total caps
+  exist, and anything they drop is listed in the `resolve-target` job summary as
+  a warning. A monorepo with 40 workspaces says so rather than looking green.
+
+Detection is a good default, not a good final answer. `yshrm` keeps an explicit
+entry precisely because detection also finds its `automationtests` Maven suite
+and two Android Gradle builds — correct, but not what you want on every PR.
+
 ## Required configuration
 
 **Actions secrets** (repository or organization scope):

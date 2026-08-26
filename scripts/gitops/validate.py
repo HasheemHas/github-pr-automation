@@ -19,9 +19,9 @@ import sys
 from pathlib import Path
 
 from ..common.commands import run_commands, summarise
-from ..common.config import artifact_dir, load_repositories, resolve_target
+from ..common.config import artifact_dir, load_defaults, load_repositories, resolve_target
 from ..common.errors import AutomationError
-from ..quality.run import build_runner, collect
+from ..quality.run import build_runner, collect, load_detection
 from .patches import apply_patch, check_paths, verify_changed_paths
 
 
@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
             env["TARGET_REPOSITORY"],
             env={"TARGET_ORG": env.get("TARGET_ORG") or "validation-only"},
             repositories=load_repositories(env["CONFIG_FILE"]),
+            defaults=load_defaults(env["CONFIG_FILE"]),
         )
         declared = check_paths(patch_text, allowed, forbidden)
     except (AutomationError, KeyError, json.JSONDecodeError) as exc:
@@ -75,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     except AutomationError as exc:
         return fail(str(exc))
 
-    commands = collect(target)
+    commands = collect(target, load_detection(env))
     results = run_commands(commands, cwd=cwd, runner=runner) if commands else []
     quality = summarise(results)
     quality["sandbox"] = sandbox_info

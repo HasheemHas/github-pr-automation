@@ -79,9 +79,40 @@ def load_repositories(path: str | Path = DEFAULT_REPOSITORIES_CONFIG) -> dict[st
     """Load the ``repositories`` mapping from the allowlist config."""
     data = load_yaml(path)
     repositories = data.get("repositories")
-    if not isinstance(repositories, dict) or not repositories:
-        raise ConfigError(f"{path} must define a non-empty 'repositories' mapping.")
+    if repositories is None:
+        # A defaults-only config is valid: every repository is then handled by
+        # the default profile.
+        return {}
+    if not isinstance(repositories, dict):
+        raise ConfigError(f"{path} must define 'repositories' as a mapping.")
     return repositories
+
+
+def load_defaults(path: str | Path = DEFAULT_REPOSITORIES_CONFIG) -> dict[str, Any]:
+    """Load the ``defaults`` block applied to repositories with no explicit entry."""
+    data = load_yaml(path)
+    defaults = data.get("defaults")
+    if defaults is None:
+        return {}
+    if not isinstance(defaults, dict):
+        raise ConfigError(f"{path} must define 'defaults' as a mapping.")
+    return defaults
+
+
+def _merge(defaults: Mapping[str, Any], explicit: Mapping[str, Any]) -> dict[str, Any]:
+    """Shallow-merge an explicit entry over the defaults, one level into dicts.
+
+    An explicit key always wins. A nested mapping (``security``, ``metadata``,
+    ``sandbox``, ``review``) merges key by key so a repository can override just
+    ``title_policy`` without restating the whole block.
+    """
+    merged: dict[str, Any] = dict(defaults)
+    for key, value in explicit.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = {**merged[key], **value}
+        else:
+            merged[key] = value
+    return merged
 
 
 def resolve_target(
@@ -90,8 +121,19 @@ def resolve_target(
     env: Mapping[str, str] | None = None,
     path: str | Path = DEFAULT_REPOSITORIES_CONFIG,
     repositories: Mapping[str, Any] | None = None,
+    defaults: Mapping[str, Any] | None = None,
 ) -> Target:
-    """Resolve ``repository`` against ``TARGET_ORG`` and the central allowlist."""
+    """Resolve ``repository`` against ``TARGET_ORG`` and the central config.
+
+    Resolution order:
+      1. an explicit ``repositories`` entry, merged over ``defaults``
+      2. otherwise ``defaults`` alone, when ``defaults.enabled`` is true
+      3. otherwise a hard failure naming the known repositories
+
+    ``defaults.deny`` always wins, so a repository can be blocked without being
+    configured. The GitHub App installation remains the real authorisation
+    boundary; this config decides what the pipeline is willing to attempt.
+    """
     name = (repository or "").strip()
     if not name:
         raise ConfigError("A target repository name is required.")
@@ -101,29 +143,88 @@ def resolve_target(
         raise ConfigError(f"Target repository {name!r} is not a valid repository name.")
 
     owner = target_org(env)
-    allowlist = dict(repositories) if repositories is not None else load_repositories(path)
+    # Only fall back to disk when the caller did not supply the config itself, so
+    # an in-memory allowlist is never silently widened by an on-disk defaults block.
+    if repositories is not None:
+        allowlist = dict(repositories)
+        default_profile = dict(defaults) if defaults is not None else {}
+    else:
+        allowlist = load_repositories(path)
+        default_profile = dict(defaults) if defaults is not None else load_defaults(path)
+
+    denied = default_profile.get("deny") or []
+    if isinstance(denied, (list, tuple)) and any(
+        str(item).strip().lower() == name.lower() for item in denied
+    ):
+        raise ConfigError(
+            f"Target repository {name!r} is explicitly denied in config/repositories.yml."
+        )
+
     entry = allowlist.get(name)
-    if entry is None:
-        known = ", ".join(sorted(allowlist)) or "none"
-        raise ConfigError(
-            f"Target repository {name!r} is not listed in the central allowlist "
-            f"(known repositories: {known})."
-        )
-    if not isinstance(entry, dict):
+    if entry is not None and not isinstance(entry, dict):
         raise ConfigError(f"Allowlist entry for {name!r} must be a mapping.")
-    if not entry.get("enabled"):
-        raise ConfigError(
-            f"Target repository {name!r} is present but not enabled. Install the "
-            "GitHub App there, then set 'enabled: true'."
+
+    if entry is None:
+        if not default_profile.get("enabled"):
+            known = ", ".join(sorted(allowlist)) or "none"
+            raise ConfigError(
+                f"Target repository {name!r} is not listed in the central allowlist "
+                f"(known repositories: {known}). Add it, or set 'defaults.enabled: true' "
+                "to allow any repository in the organisation."
+            )
+        config = _merge(default_profile, {})
+        config["_source"] = "defaults"
+    else:
+        config = _merge(default_profile, entry)
+        config["_source"] = "explicit"
+        if not config.get("enabled"):
+            raise ConfigError(
+                f"Target repository {name!r} is present but not enabled. Install the "
+                "GitHub App there, then set 'enabled: true'."
+            )
+
+    config.pop("deny", None)
+    return Target(owner=owner, repo=name, config=config)
+
+
+def has_explicit_commands(target: Target) -> bool:
+    """True when the repository declares any command itself."""
+    declared = target.config.get("commands")
+    if not isinstance(declared, Mapping):
+        return False
+    return any(declared.get(group) for group in ("install", "lint", "test", "build"))
+
+
+def detected_commands(detection: Mapping[str, Any] | None, group: str) -> list[Command]:
+    """Build commands for one group from a detection payload."""
+    entries = (detection or {}).get("commands") or []
+    result: list[Command] = []
+    for item in entries:
+        if not isinstance(item, Mapping) or item.get("group") != group:
+            continue
+        run = item.get("run")
+        if not isinstance(run, str) or not run.strip():
+            continue
+        result.append(
+            Command(name=str(item.get("name") or f"{group} command"), run=run, group=group)
         )
-    return Target(owner=owner, repo=name, config=entry)
+    return result
 
 
-def commands_for(target: Target, group: str) -> list[Command]:
-    """Normalise the declared commands for one group (install/lint/test/build).
+def commands_for(
+    target: Target,
+    group: str,
+    *,
+    detection: Mapping[str, Any] | None = None,
+) -> list[Command]:
+    """Normalise the commands for one group (install/lint/test/build).
 
-    Accepts either a plain string or a ``{name, run}`` mapping per entry.
+    Accepts either a plain string or a ``{name, run}`` mapping per entry. When the
+    repository declares no commands at all, the detected ones are used instead, so
+    an unconfigured repository still gets validated.
     """
+    if detection is not None and not has_explicit_commands(target):
+        return detected_commands(detection, group)
     declared = ((target.config.get("commands") or {}).get(group)) or []
     if not isinstance(declared, list):
         raise ConfigError(f"commands.{group} for {target.repo} must be a list.")

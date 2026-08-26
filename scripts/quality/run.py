@@ -19,17 +19,41 @@ from pathlib import Path
 from ..common import sandbox as sandbox_module
 from ..common import summary
 from ..common.commands import run_commands, summarise, write_result
-from ..common.config import Target, commands_for, load_repositories, resolve_target
+from ..common.config import (
+    Target,
+    commands_for,
+    has_explicit_commands,
+    load_defaults,
+    load_repositories,
+    resolve_target,
+)
 from ..common.errors import AutomationError
 
 GROUPS = ("install", "lint", "test", "build")
 
 
-def collect(target: Target) -> list:
-    """Flatten the configured command groups into a single ordered list."""
+def load_detection(env=None) -> dict | None:
+    """Read ``detected-commands.json`` from the artifact directory, if present."""
+    environ = os.environ if env is None else env
+    path = Path(environ.get("DETECTED_COMMANDS_FILE") or "")
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def collect(target: Target, detection: dict | None = None) -> list:
+    """Flatten the command groups into a single ordered list.
+
+    Explicit config wins. When the repository declares no commands, the detected
+    ones are used so an unconfigured repository is still validated.
+    """
     commands: list = []
     for group in GROUPS:
-        commands.extend(commands_for(target, group))
+        commands.extend(commands_for(target, group, detection=detection))
     return commands
 
 
@@ -127,8 +151,11 @@ def main(argv: list[str] | None = None) -> int:
             repository,
             env={"TARGET_ORG": env.get("TARGET_ORG") or "validation-only"},
             repositories=repositories,
+            defaults=load_defaults(config_file),
         )
-        commands = collect(target)
+        detection = load_detection(env)
+        commands = collect(target, detection)
+        source = "explicit config" if has_explicit_commands(target) else "auto-detected"
     except AutomationError as exc:
         write_result(result_file, {"status": "error", "reason": str(exc), "results": []})
         print(f"::error::{exc}", file=sys.stderr)
@@ -137,10 +164,18 @@ def main(argv: list[str] | None = None) -> int:
     if not commands:
         write_result(
             result_file,
-            {"status": "not_run", "reason": "No quality commands are configured.", "results": []},
+            {
+                "status": "not_run",
+                "reason": (
+                    "No quality commands are configured and none could be detected "
+                    "from the repository's manifests."
+                ),
+                "results": [],
+            },
         )
-        print("No quality commands configured; reporting NOT RUN.")
+        print("No quality commands configured or detected; reporting NOT RUN.")
         return 0
+    print(f"Commands from: {source} ({len(commands)} command(s))")
 
     if not Path(workdir).is_dir():
         write_result(

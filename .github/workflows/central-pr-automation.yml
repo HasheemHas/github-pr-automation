@@ -169,6 +169,7 @@ jobs:
             ${{ runner.temp }}/pr-automation-artifacts/changed-files.json
             ${{ runner.temp }}/pr-automation-artifacts/pr.diff
             ${{ runner.temp }}/pr-automation-artifacts/plan.json
+            ${{ runner.temp }}/pr-automation-artifacts/detected-commands.json
       - name: Upload CODEOWNERS when present
         uses: actions/upload-artifact@v6
         if: steps.files.outputs.codeowners == 'true'
@@ -393,6 +394,11 @@ jobs:
         run: python -m pip install --disable-pip-version-check -r requirements.txt
       - uses: actions/setup-node@v5
         with: { node-version: '22' }
+      - name: Download PR context for auto-detected commands
+        uses: actions/download-artifact@v7
+        with:
+          name: pr-automation-context
+          path: ${{ runner.temp }}/pr-automation-artifacts
       - uses: actions/download-artifact@v7
         with:
           name: pr-automation-target-source
@@ -444,6 +450,7 @@ jobs:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           TARGET_WORKDIR: target
           CONFIG_FILE: ${{ github.workspace }}/config/repositories.yml
+          DETECTED_COMMANDS_FILE: ${{ runner.temp }}/pr-automation-artifacts/detected-commands.json
           PATCH_FILE: ${{ needs.plan.outputs.run_fix == 'true' && 'fix.patch' || 'resolution.patch' }}
           PATCH_ALLOWED_PATHS: >-
             ${{ needs.plan.outputs.run_fix == 'true'
@@ -458,6 +465,7 @@ jobs:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           TARGET_WORKDIR: target
           CONFIG_FILE: ${{ github.workspace }}/config/repositories.yml
+          DETECTED_COMMANDS_FILE: ${{ runner.temp }}/pr-automation-artifacts/detected-commands.json
           QUALITY_RESULT_FILE: ${{ runner.temp }}/pr-automation-artifacts/quality-result.json
         run: python -m scripts.quality.run
       - name: Run configured security scanners
@@ -467,6 +475,7 @@ jobs:
           TARGET_REPOSITORY: ${{ inputs.repository }}
           TARGET_WORKDIR: target
           CONFIG_FILE: ${{ github.workspace }}/config/repositories.yml
+          DETECTED_COMMANDS_FILE: ${{ runner.temp }}/pr-automation-artifacts/detected-commands.json
           SECURITY_RESULT_FILE: ${{ runner.temp }}/pr-automation-artifacts/security-result.json
         run: python -m scripts.security.run
       # Only the result JSON files leave this job. Never the source, never a log
