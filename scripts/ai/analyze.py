@@ -29,19 +29,29 @@ from .chunking import (
     plan_batches,
 )
 from .client import complete_json, metadata_model, review_model
+from .telemetry import Recorder
 from .schemas import validate_metadata, validate_patch, validate_review, validate_tests
 
 
 def _section(name: str, runner: Callable[[], dict[str, Any]]) -> dict[str, Any]:
-    """Run one AI section, converting any failure into a recorded non-result."""
+    """Run one AI section, converting any failure into a recorded non-result.
+
+    Console output is wrapped in a log group so each section is collapsible in the
+    Actions UI, with the per-request lines inside it.
+    """
+    print(f"::group::AI section: {name}")
     try:
-        return {"status": "ok", "data": runner()}
+        data = runner()
+        print(f"section '{name}': ok")
+        return {"status": "ok", "data": data}
     except AIError as exc:
         print(f"::warning::AI section '{name}' failed: {exc}", file=sys.stderr)
         return {"status": "error", "error": str(exc), "data": None}
     except Exception as exc:  # never let an unexpected error look like success
         print(f"::warning::AI section '{name}' failed: {type(exc).__name__}.", file=sys.stderr)
         return {"status": "error", "error": f"Unexpected {type(exc).__name__}.", "data": None}
+    finally:
+        print("::endgroup::")
 
 
 def _int_env(env: Mapping[str, str], name: str, default: int) -> int:
@@ -62,6 +72,7 @@ def review_in_batches(
     security_only: bool,
     client=None,
     env: Mapping[str, str] | None = None,
+    recorder: Recorder | None = None,
 ) -> dict[str, Any]:
     """Review the whole diff across as many requests as it takes.
 
@@ -109,6 +120,8 @@ def review_in_batches(
                 validator=lambda payload: validate_review(payload, changed_paths=changed),
                 client=client,
                 env=env,
+                recorder=recorder,
+                section=f"review[{index}/{total_batches}]",
             )
         except AIError as exc:
             # One failed batch must not discard the batches that succeeded, and
@@ -165,6 +178,7 @@ def analyse(
     *,
     client=None,
     env: Mapping[str, str] | None = None,
+    recorder: Recorder | None = None,
 ) -> dict[str, Any]:
     """Produce the analysis payload for the requested plan."""
     changed = {p for p in (context.get("files") or []) if isinstance(p, str)}
@@ -185,6 +199,8 @@ def analyse(
                 validator=validate_metadata,
                 client=client,
                 env=env,
+                recorder=recorder,
+                section="metadata",
             ),
         )
 
@@ -194,7 +210,8 @@ def analyse(
         result["review"] = _section(
             "security" if security_only else "review",
             lambda: review_in_batches(
-                context, diff, security_only=security_only, client=client, env=env
+                context, diff, security_only=security_only, client=client, env=env,
+                recorder=recorder,
             ),
         )
         result["review_scope"] = "security" if security_only else "full"
@@ -212,6 +229,8 @@ def analyse(
                 validator=validate_tests,
                 client=client,
                 env=env,
+                recorder=recorder,
+                section="tests",
             ),
         )
         result["test_inventory"] = {
@@ -249,13 +268,15 @@ def analyse(
                     validator=validate_patch,
                     client=client,
                     env=env,
+                    recorder=recorder,
+                    section="fix",
                 ),
             )
 
     return result
 
 
-def write_summary(result: Mapping[str, Any]) -> None:
+def write_summary(result: Mapping[str, Any], recorder: Recorder | None = None) -> None:
     """Render the AI outcome into the Actions job summary."""
     rows = []
     for key, label in (
@@ -332,6 +353,29 @@ def write_summary(result: Mapping[str, Any]) -> None:
     if gaps:
         blocks.append(summary.details(f"Potential test gaps ({len(gaps)})", summary.bullets(gaps)))
 
+    # Request-level log: one row per model call, so a failure is diagnosable from
+    # the run page without downloading anything.
+    if recorder is not None and recorder.records:
+        totals = recorder.totals
+        blocks.append(
+            summary.definitions(
+                {
+                    "Model requests": totals["requests"],
+                    "Succeeded / failed": f"{totals['succeeded']} / {totals['failed']}",
+                    "Retries": totals["retries"],
+                    "Total latency": f"{totals['duration_ms'] / 1000:.1f}s",
+                    "Output tokens": totals["completion_tokens"] or "not reported",
+                }
+            )
+        )
+        blocks.append(
+            summary.details(
+                f"Request log ({totals['requests']})",
+                summary.table(list(Recorder.HEADERS), recorder.rows()),
+                open_by_default=bool(totals["failed"]),
+            )
+        )
+
     summary.write(*blocks)
 
 
@@ -347,8 +391,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::Could not load AI inputs: {exc}", file=sys.stderr)
         return 1
 
-    result = analyse(plan, context, diff, env=env)
+    recorder = Recorder.from_env(env)
+    result = analyse(plan, context, diff, env=env, recorder=recorder)
     (out_dir / "analysis.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+
+    # One JSON object per model request, for after-the-fact debugging.
+    recorder.write(out_dir / "ai-log.jsonl")
+    totals = recorder.totals
+    print(
+        "AI requests: "
+        + json.dumps({k: v for k, v in totals.items() if v is not None})
+    )
+    if recorder.log_prompts:
+        print("::notice::AI_LOG_PROMPTS is on; ai-log.jsonl includes prompt text.")
 
     # A patch is written as its own artifact only when it is non-empty.
     fix = (result.get("fix") or {}).get("data") or {}
@@ -361,7 +416,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sections = {k: v.get("status") for k, v in result.items() if isinstance(v, dict) and "status" in v}
     print("AI sections: " + (json.dumps(sections) if sections else "none requested"))
-    write_summary(result)
+    write_summary(result, recorder)
     # Section failures are reported, not fatal: the report job renders them as
     # "NOT RUN" and leaves the target PR untouched for those sections.
     return 0

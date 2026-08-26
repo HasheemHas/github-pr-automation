@@ -142,11 +142,14 @@ repositories:
             -r backend/ai_microservice/requirements.txt;
             else echo "no python requirements"; fi'
       lint:
-        # php -l exits non-zero per file; xargs propagates that as 123.
+        # find -exec continues past a failing file, so EVERY syntax error is
+        # reported. xargs aborts on php -l's exit status 255 and shows only the
+        # first one.
         - name: PHP syntax
           run: >-
-            sh -c 'find . -path ./vendor -prune -o -name "*.php" -print0
-            | xargs -0 -r -n1 -P4 php -l > /dev/null'
+            sh -c 'errors=$(find . -path ./vendor -prune -o -name "*.php"
+            -exec php -l {} \; 2>&1 | grep -v "^No syntax errors");
+            [ -z "$errors" ] || { printf "%s\n" "$errors"; exit 1; }'
         - name: Python syntax
           run: >-
             python3 -c "import pathlib;

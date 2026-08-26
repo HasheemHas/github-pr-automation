@@ -95,6 +95,33 @@ and two Android Gradle builds — correct, but not what you want on every PR.
 | `AI_METADATA_MODEL` | no | Overrides `nvidia/nemotron-3.5-lightning-30b-a3b` |
 | `AI_REVIEW_MODEL` | no | Overrides `nvidia/nemotron-3.5-lightning-30b-a3b` (review, test-gap analysis and patches) |
 | `AI_MAX_TOKENS` | no | Output-token budget per request, default `8192`. Raise it if a reasoning model runs out of room before emitting its JSON |
+| `AI_LOG_PROMPTS` | no | `true` to include prompt text in `ai-log.jsonl`. Off by default — sizes are logged either way |
+
+### AI request logs
+
+Every model call is logged three ways, so a failure is diagnosable without
+guesswork:
+
+**In the Actions log**, one line per request, grouped per section:
+
+```text
+metadata | attempt 1/3 | model=nvidia/… | mode=json_object | prompt=12000c |
+  response=70c | 1400ms | outcome=parse_error | error=… It began: 'Sure! Let me…'
+metadata | attempt 2/3 | model=nvidia/… | mode=plain | prompt=12000c |
+  response=83c | 1400ms | outcome=ok
+```
+
+**In the job summary**, a table of every request plus totals (requests,
+succeeded/failed, retries, latency, output tokens).
+
+**As `ai-log.jsonl`** in the `pr-automation-analysis` artifact (kept 7 days), one
+JSON object per request with section, model, attempt, mode, outcome, latency,
+prompt/response sizes, `finish_reason`, token usage and `max_tokens`.
+
+Outcomes are `ok`, `provider_error`, `truncated`, `parse_error`, `schema_error`,
+`empty` — enough to tell "the provider refused" from "it ran out of tokens" from
+"it returned prose". A failing response is quoted (500 chars); a successful one
+is not, because it is already in `analysis.json`. The API key never appears.
 
 `TARGET_ORG` is not `GITHUB_ORG`: GitHub reserves the `GITHUB_` prefix and will
 not let you create a variable with that name.

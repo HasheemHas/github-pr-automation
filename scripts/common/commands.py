@@ -109,6 +109,7 @@ def run_commands(
                 )
             )
             continue
+        timed_out = False
         try:
             # Sandbox runners read this to apply a per-group network policy.
             try:
@@ -117,6 +118,9 @@ def run_commands(
                 pass
             code, output = execute(command.run, cwd, env, timeout)
         except subprocess.TimeoutExpired:
+            # 124 is also what xargs returns when it aborts, so the distinction is
+            # carried in `reason` rather than inferred from the exit code.
+            timed_out = True
             code, output = 124, f"Timed out after {timeout}s."
         results.append(
             CommandResult(
@@ -125,6 +129,7 @@ def run_commands(
                 command=command.run,
                 status="pass" if code == 0 else "fail",
                 exit_code=code,
+                reason=f"Timed out after {timeout}s." if timed_out else "",
                 output_tail=_tail(output),
             )
         )

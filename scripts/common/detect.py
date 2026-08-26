@@ -211,11 +211,15 @@ def _php(paths: Sequence[str], read: ReadFile, budget: list[int]) -> list[Detect
             )
         )
     if _has_any(paths, ".php"):
+        # find -exec keeps going after a failing file, so every syntax error is
+        # reported. xargs aborts on php -l's exit status 255 and would show only
+        # the first one.
         out.append(
             Detected(
                 "php syntax",
-                "sh -c 'find . -path ./vendor -prune -o -name \"*.php\" -print0 "
-                "| xargs -0 -r -n1 -P4 php -l > /dev/null'",
+                "sh -c 'errors=$(find . -path ./vendor -prune -o -name \"*.php\" "
+                "-exec php -l {} \\; 2>&1 | grep -v \"^No syntax errors\"); "
+                "[ -z \"$errors\" ] || { printf \"%s\\n\" \"$errors\"; exit 1; }'",
                 "lint",
                 "php files present",
             )

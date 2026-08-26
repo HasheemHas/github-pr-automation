@@ -131,6 +131,15 @@ def test_php_lint_prunes_vendor():
     assert any("-path ./vendor -prune" in c for c in groups(result)["lint"])
 
 
+def test_php_lint_reports_every_error_not_just_the_first():
+    # xargs aborts on php -l's exit status 255, hiding every error after the
+    # first. find -exec keeps going.
+    command = next(c for c in groups(detect(["index.php"]))["lint"] if "php -l" in c)
+    assert "-exec php -l" in command
+    assert "xargs" not in command
+    assert "grep -v" in command  # filters the "No syntax errors" noise
+
+
 # -- other ecosystems ------------------------------------------------------
 
 @pytest.mark.parametrize(

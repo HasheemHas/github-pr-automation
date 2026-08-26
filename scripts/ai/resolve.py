@@ -18,6 +18,7 @@ from ..common.errors import AIError
 from ..common.globs import matches
 from . import prompts
 from .client import complete_json, review_model
+from .telemetry import Recorder
 from .schemas import validate_patch
 
 
@@ -28,6 +29,7 @@ def resolve(
     *,
     client=None,
     env: Mapping[str, str] | None = None,
+    recorder: Recorder | None = None,
 ) -> dict[str, Any]:
     """Ask for a resolution patch, refusing anything outside the allowlist."""
     if not conflicts:
@@ -59,7 +61,8 @@ def resolve(
             validator=validate_patch,
             client=client,
             env=env,
-            max_tokens=8192,
+            recorder=recorder,
+            section="resolve-conflicts",
         )
     except AIError as exc:
         print(f"::warning::Conflict resolution failed: {exc}", file=sys.stderr)
@@ -94,7 +97,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::Could not load conflict inputs: {exc}", file=sys.stderr)
         return 1
 
-    result = resolve(context, conflicts, list(allowed), env=env)
+    recorder = Recorder.from_env(env)
+    result = resolve(context, conflicts, list(allowed), env=env, recorder=recorder)
+    recorder.write(out_dir / "ai-log.jsonl")
     (out_dir / "resolution.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     if result["status"] == "ok":
         (out_dir / "resolution.patch").write_text(result["data"]["patch"], encoding="utf-8")

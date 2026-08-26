@@ -211,6 +211,7 @@ jobs:
           AI_METADATA_MODEL: ${{ vars.AI_METADATA_MODEL }}
           AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
           AI_MAX_TOKENS: ${{ vars.AI_MAX_TOKENS }}
+          AI_LOG_PROMPTS: ${{ vars.AI_LOG_PROMPTS }}
           PR_AUTOMATION_PLAN: ${{ needs.plan.outputs.plan }}
         run: python -m scripts.ai.analyze
       - name: Detect a candidate patch
@@ -227,9 +228,11 @@ jobs:
         if: always()
         with:
           name: pr-automation-analysis
-          retention-days: 1
+          retention-days: 7
           if-no-files-found: warn
-          path: ${{ runner.temp }}/pr-automation-artifacts/analysis.json
+          path: |
+            ${{ runner.temp }}/pr-automation-artifacts/analysis.json
+            ${{ runner.temp }}/pr-automation-artifacts/ai-log.jsonl
       - name: Upload candidate patch
         uses: actions/upload-artifact@v6
         if: always() && steps.files.outputs.patch == 'true'
@@ -350,6 +353,7 @@ jobs:
           AI_BASE_URL: ${{ vars.AI_BASE_URL }}
           AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
           AI_MAX_TOKENS: ${{ vars.AI_MAX_TOKENS }}
+          AI_LOG_PROMPTS: ${{ vars.AI_LOG_PROMPTS }}
           RESOLVE_ALLOWED_PATHS: ${{ toJSON(fromJSON(needs.plan.outputs.plan).resolve_allowed_paths) }}
         run: python -m scripts.ai.resolve
       - name: Upload resolution
@@ -357,11 +361,12 @@ jobs:
         if: always()
         with:
           name: pr-automation-resolution
-          retention-days: 1
+          retention-days: 7
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/pr-automation-artifacts/resolution.json
             ${{ runner.temp }}/pr-automation-artifacts/resolution.patch
+            ${{ runner.temp }}/pr-automation-artifacts/ai-log.jsonl
 
   # ------------------------------------------------------- validate-target -----
   # THE ONLY JOB THAT EXECUTES TARGET-CONTROLLED CODE.

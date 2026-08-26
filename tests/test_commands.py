@@ -115,6 +115,15 @@ def test_a_timeout_is_recorded_as_a_failure():
     assert results[0].status == "fail"
     assert results[0].exit_code == 124
     assert "Timed out" in results[0].output_tail
+    # 124 is also xargs's abort code, so the reason disambiguates.
+    assert results[0].reason == "Timed out after 5s."
+
+
+def test_exit_code_124_from_the_command_itself_is_not_called_a_timeout():
+    results = run_commands([LINT], runner=runner_for([124]))
+    assert results[0].status == "fail"
+    assert results[0].exit_code == 124
+    assert results[0].reason == ""
 
 
 def test_command_output_is_truncated():

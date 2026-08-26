@@ -14,7 +14,8 @@ import os
 import re
 from typing import Any, Callable, Mapping
 
-from ..common.errors import AIError
+from ..common.errors import AIError, SchemaError
+from .telemetry import Recorder, usage_of
 
 #: Output-token budget. Reasoning models spend tokens before answering, so this
 #: needs headroom over the size of the JSON itself.
@@ -203,6 +204,8 @@ def complete_json(
     temperature: float = 0.2,
     max_tokens: int | None = None,
     env: Mapping[str, str] | None = None,
+    recorder: "Recorder | None" = None,
+    section: str = "",
 ) -> dict[str, Any]:
     """Ask for JSON, escalating strictness until the model complies.
 
@@ -233,13 +236,40 @@ def complete_json(
         ),
     ]
 
+    total = len(attempts)
     last_error: AIError | None = None
     for index, (extra, suffix) in enumerate(attempts):
-        is_last = index == len(attempts) - 1
+        is_last = index == total - 1
+        system_text = system + suffix
         messages = [
-            {"role": "system", "content": system + suffix},
+            {"role": "system", "content": system_text},
             {"role": "user", "content": user},
         ]
+
+        def record(outcome: str, *, response_text: str = "", finish: str = "",
+                   usage: Mapping[str, Any] | None = None, error: str = "") -> None:
+            """Log this attempt, whatever happened to it."""
+            if recorder is None:
+                return
+            entry = recorder.add(
+                section=section or "ai",
+                model=model,
+                attempt=index + 1,
+                attempts_total=total,
+                structured=bool(extra),
+                outcome=outcome,
+                started=started,
+                system=system_text,
+                prompt=user,
+                response_text=response_text,
+                finish_reason=finish,
+                usage=usage,
+                max_tokens=budget,
+                error=error,
+            )
+            print(recorder.line(entry))
+
+        started = recorder.start() if recorder is not None else 0.0
         try:
             response = active.chat.completions.create(
                 model=model,
@@ -249,12 +279,15 @@ def complete_json(
                 **extra,
             )
         except Exception as exc:  # provider errors vary by SDK version and model
+            record("provider_error", error=f"{type(exc).__name__}: {exc}")
             if index == 0 and _looks_like_response_format_rejection(exc):
                 last_error = AIError(f"structured mode rejected: {type(exc).__name__}")
                 continue
             raise AIError(f"Model {model} request failed: {type(exc).__name__}.") from None
 
         content, finish_reason = _message_text(response)
+        counts = usage_of(response)
+
         if finish_reason == "length" and "{" not in content:
             # Out of tokens before producing anything parseable: say so plainly
             # rather than reporting "no JSON object".
@@ -262,14 +295,21 @@ def complete_json(
                 f"Model {model} hit the {budget}-token output limit before emitting "
                 "JSON. Raise the AI_MAX_TOKENS variable."
             )
+            record("truncated", response_text=content, finish=finish_reason,
+                   usage=counts, error=str(error))
             if is_last:
                 raise error
             last_error = error
             continue
 
         try:
-            return validator(extract_json(content))
+            result = validator(extract_json(content))
         except AIError as exc:
+            outcome = "schema_error" if isinstance(exc, SchemaError) else (
+                "empty" if "empty response" in str(exc) else "parse_error"
+            )
+            record(outcome, response_text=content, finish=finish_reason,
+                   usage=counts, error=str(exc))
             # A parse or schema failure is worth one stricter retry; the same model
             # asked more bluntly often complies.
             if is_last:
@@ -277,8 +317,11 @@ def complete_json(
             last_error = exc
             continue
 
+        record("ok", response_text=content, finish=finish_reason, usage=counts)
+        return result
+
     raise AIError(
-        f"Model {model} did not return usable JSON after {len(attempts)} attempts. "
+        f"Model {model} did not return usable JSON after {total} attempts. "
         f"Last error: {last_error}"
     )
 
