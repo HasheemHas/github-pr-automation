@@ -227,6 +227,11 @@ story without opening the logs or the PR:
 Missing `GITHUB_STEP_SUMMARY` is a no-op, so the scripts stay runnable locally,
 and a summary write failure can never fail a job.
 
+`report-to-target` succeeds when it successfully publishes the result, even when
+the target quality gate is `FAIL`. The `PR Automation / Quality Gate` check on
+the target commit retains the failing conclusion for branch protection; the
+reporting job is not marked as crashed merely because it reported that failure.
+
 ## Review and fix rules
 
 The built-in diff review detects credential-shaped literals, private keys,

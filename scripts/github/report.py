@@ -837,8 +837,14 @@ def main(argv: list[str] | None = None) -> int:
     for section in sections:
         print(f"{section.name}: {section.status}")
     print(f"Overall: {verdict}")
-    # Only a real FAIL reddens the run. A missing optional artifact is NOT RUN.
-    return 1 if verdict == FAIL else 0
+    # Publishing a failed target gate is a successful reporting operation. The
+    # target check run already carries conclusion=failure and is what branch
+    # protection should enforce. Returning 1 here incorrectly makes the reporter
+    # look broken and obscures the upstream validation failures it successfully
+    # published.
+    if verdict == FAIL:
+        print("::warning::Target quality gate failed; the failure was published to the PR check.")
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
