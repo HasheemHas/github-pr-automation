@@ -132,11 +132,17 @@ def _render_list_template(
     limit: int,
 ) -> list[str]:
     pattern = _template_text(template, key)
+    # No override means "use the diff-derived content". Returning the raw value
+    # here used to turn an empty template into bullets such as `src` or
+    # `backend`, preventing the real test-plan and review-focus generators from
+    # running at all.
+    if not pattern:
+        return []
     rendered: list[str] = []
     for value in list(values)[:limit]:
         data = dict(base_values)
         data[variable] = value
-        text = pattern.format_map(_SafeFormat(data)).strip() if pattern else str(value).strip()
+        text = pattern.format_map(_SafeFormat(data)).strip()
         if text:
             rendered.append(text)
     return rendered
@@ -176,7 +182,9 @@ def generate_metadata(
         reviewable_components[0] if len(reviewable_components) == 1 else "repository"
     )
     prefix = {"feature": "feat", "documentation": "docs"}.get(kind, kind)
-    title = f"{prefix}({component}): {subject[:180]}"
+    derived_title_subject = describe.concise_title_subject(changes, diff=diff)
+    title_subject = derived_title_subject or subject
+    title = f"{prefix}({component}): {title_subject[:180]}"
     files = len(paths)
     additions = int(context.get("additions") or 0)
     deletions = int(context.get("deletions") or 0)
@@ -222,14 +230,15 @@ def generate_metadata(
     )
     glance = describe.at_a_glance(
         changes, context, change_type=kind, risk=risk,
-        risk_reason=derived_risk_reason, insights=insights,
+        risk_reason=derived_risk_reason, insights=insights, diff=diff,
     )
+    natural_summary = describe.concise_summary(changes, context, diff=diff) or glance
 
     return {
         "title": title,
-        "summary": _render_template(template, "summary", template_values) or glance,
+        "summary": _render_template(template, "summary", template_values) or natural_summary,
         "description": (
-            _render_template(template, "description", template_values) or glance
+            _render_template(template, "description", template_values) or natural_summary
         ),
         "at_glance": glance,
         "change_type": kind,
@@ -247,8 +256,8 @@ def generate_metadata(
         "recommended_testing": _render_list_template(
             template, "testing_item", reviewable_components, "component",
             template_values, limit=8,
-        ) or describe.test_plan(context),
-        "test_plan": describe.test_plan(context),
+        ) or describe.test_plan(context, changes=changes, diff=diff),
+        "test_plan": describe.test_plan(context, changes=changes, diff=diff),
         "review_focus": _render_list_template(
             template, "review_focus_item", reviewable, "path", template_values, limit=10
         ),
@@ -387,7 +396,7 @@ def analyse(plan: Mapping[str, Any], context: Mapping[str, Any], diff: str) -> d
             "data": generate_metadata(context, template, diff=diff, insights=result),
         }
         # Test plan and migration notes need the test-gap and migration results.
-        enrich_metadata(result, context)
+        enrich_metadata(result, context, diff=diff)
     if plan.get("fix"):
         findings = ((result.get("review") or {}).get("data") or {}).get("findings") or []
         fixable = [f for f in findings if f.get("rule") in {
@@ -413,7 +422,7 @@ def _section_data(result: Mapping[str, Any], key: str) -> dict[str, Any]:
 
 
 def enrich_metadata(
-    result: dict[str, Any], context: Mapping[str, Any] | None = None
+    result: dict[str, Any], context: Mapping[str, Any] | None = None, *, diff: str = ""
 ) -> None:
     """Fold insight findings into the generated PR metadata, in place.
 
@@ -484,6 +493,7 @@ def enrich_metadata(
     if tests_data and context is not None:
         plan_steps = describe.test_plan(
             context, tests=tests_data, coverage=_section_data(result, "coverage"),
+            changes=parse_changes(diff) if diff else {}, diff=diff,
         )
         if plan_steps:
             metadata["test_plan"] = plan_steps

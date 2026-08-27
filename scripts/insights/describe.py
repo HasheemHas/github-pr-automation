@@ -112,15 +112,70 @@ SYMBOL_PATTERNS: tuple[tuple[tuple[str, ...], re.Pattern[str], str], ...] = (
     ((".sql",),
      re.compile(r"(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|INDEX|FUNCTION)\s+"
                 r"(?:IF\s+NOT\s+EXISTS\s+)?[`\"\[]?(?P<name>[\w.]+)"), "object"),
+    ((".rs",),
+     re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+|const\s+|unsafe\s+)*fn\s+"
+                r"(?P<name>\w+)"), "function"),
+    ((".rs",),
+     re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait|type)\s+"
+                r"(?P<name>\w+)"), "type"),
+    ((".rs",), re.compile(r"^\s*impl(?:<[^>]*>)?\s+(?P<name>\w+)"), "impl"),
+    ((".swift",),
+     re.compile(r"^\s*(?:public\s+|private\s+|internal\s+|open\s+)?(?:static\s+)?"
+                r"func\s+(?P<name>\w+)"), "function"),
+    ((".swift",),
+     re.compile(r"^\s*(?:public\s+|private\s+|internal\s+|open\s+|final\s+)*"
+                r"(?:class|struct|enum|protocol|extension|actor)\s+(?P<name>\w+)"), "type"),
+    ((".ex", ".exs"),
+     re.compile(r"^\s*def(?:p)?\s+(?P<name>[\w?!]+)"), "function"),
+    ((".ex", ".exs"),
+     re.compile(r"^\s*defmodule\s+(?P<name>[\w.]+)"), "module"),
+    ((".ex", ".exs"), re.compile(r"^\s*defstruct\b(?P<name>)"), "struct"),
+    ((".scala", ".sc"),
+     re.compile(r"^\s*(?:private\s+|protected\s+)?def\s+(?P<name>\w+)"), "method"),
+    ((".scala", ".sc"),
+     re.compile(r"^\s*(?:final\s+|sealed\s+|abstract\s+|case\s+)*"
+                r"(?:class|object|trait|type)\s+(?P<name>\w+)"), "type"),
+    ((".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".m", ".mm"),
+     re.compile(r"^\s*(?:[A-Za-z_][\w:<>,*&\s]*?\s+)?(?P<name>[A-Za-z_]\w*)"
+                r"(?:::(?P<method>\w+))?\s*\([^;]*\)\s*(?:const\s*)?\{"), "function"),
+    ((".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh"),
+     re.compile(r"^\s*(?:class|struct|namespace|enum(?:\s+class)?)\s+(?P<name>\w+)"),
+     "type"),
+    ((".dart",),
+     re.compile(r"^\s*(?:abstract\s+)?class\s+(?P<name>\w+)"), "class"),
+    ((".dart",),
+     re.compile(r"^\s*(?:Future<[^>]*>|void|[A-Z]\w*|var)\s+(?P<name>\w+)\s*\("),
+     "function"),
+    ((".lua",), re.compile(r"^\s*(?:local\s+)?function\s+(?P<name>[\w.:]+)"), "function"),
+    ((".sh", ".bash"),
+     re.compile(r"^\s*(?:function\s+)?(?P<name>[a-z_][\w-]*)\s*\(\s*\)\s*\{"), "function"),
+    ((".tf",),
+     re.compile(r'^\s*(?:resource|module|data|variable|output)\s+"(?P<name>[^"]+)"'),
+     "block"),
 )
 
-#: A workflow job key: exactly two spaces of indent inside a `jobs:` mapping.
-_WORKFLOW_JOB = re.compile(r"^  (?P<name>[A-Za-z_][\w-]*):\s*$")
+#: Single-file component formats whose ``<script>`` block is JavaScript or
+#: TypeScript, so the JS patterns apply to them.
+SCRIPT_COMPONENT_EXTENSIONS = {".vue": ".ts", ".svelte": ".ts", ".astro": ".ts"}
+
+#: A workflow job key: any indented bare key. The indent width is not fixed at
+#: two spaces, because plenty of repositories indent YAML by four.
+_WORKFLOW_JOB = re.compile(r"^(?P<indent>\s+)(?P<name>[A-Za-z_][\w-]*):\s*$")
+#: Keys that appear at job-or-step level and are never a job name.
+_WORKFLOW_RESERVED = frozenset({
+    "on", "jobs", "env", "defaults", "permissions", "concurrency", "steps", "with",
+    "needs", "if", "runs-on", "strategy", "matrix", "outputs", "container",
+    "services", "secrets", "run", "uses", "name", "id", "shell", "working-directory",
+    "continue-on-error", "timeout-minutes", "fail-fast", "include", "exclude",
+    "inputs", "outputs", "type", "required", "default", "description", "options",
+    "credentials", "ports", "volumes", "options", "image", "cache", "path",
+})
 _WORKFLOW_USES = re.compile(r"^\s*-?\s*uses:\s*(?P<name>[^\s#]+)")
-_WORKFLOW_TRIGGER = re.compile(r"^  (?P<name>push|pull_request|schedule|workflow_call|"
+_WORKFLOW_TRIGGER = re.compile(r"^\s+(?P<name>push|pull_request|schedule|workflow_call|"
                                r"workflow_dispatch|release|issue_comment):")
-#: A top-level key in a flat config file.
-_CONFIG_KEY = re.compile(r"^(?P<name>[A-Za-z_][\w.-]*)\s*[:=]")
+#: A config key, at any nesting depth. Only matching column zero meant a nested
+#: `timeout:` under `database:` was invisible.
+_CONFIG_KEY = re.compile(r"^(?P<indent>\s*)(?P<name>[A-Za-z_][\w.-]*)\s*[:=]")
 #: A markdown heading, which is what a docs change actually adds.
 _HEADING = re.compile(r"^#{1,4}\s+(?P<name>.+?)\s*$")
 
@@ -195,7 +250,12 @@ def group_noise(paths: Iterable[str]) -> list[dict[str, Any]]:
 
 
 def _symbols(lines: Sequence[Line], extension: str) -> list[tuple[str, str]]:
-    """``[(kind, name)]`` for the declarations in a set of diff lines."""
+    """``[(kind, name)]`` for the declarations in a set of diff lines.
+
+    A single-file component (.vue, .svelte) carries its logic in a ``<script>``
+    block, so it is read with the JavaScript/TypeScript patterns.
+    """
+    extension = SCRIPT_COMPONENT_EXTENSIONS.get(extension, extension)
     found: list[tuple[str, str]] = []
     seen: set[str] = set()
     for line in lines:
@@ -225,8 +285,12 @@ def _workflow_facts(change: FileChange) -> dict[str, list[str]]:
             action = _WORKFLOW_USES.match(line.text)
             if trigger and trigger.group("name") not in triggers:
                 triggers.append(trigger.group("name"))
-            elif job and job.group("name") not in jobs:
-                jobs.append(job.group("name"))
+            elif job and job.group("name").lower() not in _WORKFLOW_RESERVED:
+                # A bare indented key that is not a known workflow key is a job.
+                # Only the shallowest such indent can be a job name, so a deeply
+                # nested `with:` entry cannot masquerade as one.
+                if len(job.group("indent")) <= 4 and job.group("name") not in jobs:
+                    jobs.append(job.group("name"))
             if action and action.group("name") not in uses:
                 uses.append(action.group("name"))
         return {"jobs": jobs, "uses": uses, "triggers": triggers}
@@ -246,8 +310,13 @@ def _config_keys(change: FileChange) -> dict[str, list[str]]:
         found: list[str] = []
         for line in lines:
             match = _CONFIG_KEY.match(line.text)
-            if match and match.group("name") not in found:
-                found.append(match.group("name"))
+            if not match:
+                continue
+            name = match.group("name")
+            # A nested key is qualified by nothing here, but naming the leaf is
+            # far more useful than naming only its top-level parent.
+            if name not in found:
+                found.append(name)
         return found
 
     added, removed = keys(change.added), keys(change.removed)
@@ -342,6 +411,109 @@ def _plural(word: str, count: int) -> str:
     return word + "s"
 
 
+def _trailing_comment(change: FileChange) -> str:
+    """Return a comment appended to an otherwise unchanged line, if present."""
+    if len(change.added) != 1 or len(change.removed) != 1:
+        return ""
+    before = change.removed[0].text.rstrip()
+    after = change.added[0].text.rstrip()
+    if not before or not after.startswith(before):
+        return ""
+    suffix = after[len(before):].strip()
+    if suffix.startswith(("#", "//", "/*")) and len(suffix) <= 120:
+        return suffix
+    return ""
+
+
+def _final_newline_fixed(diff: str, path: str) -> bool:
+    """Whether the old file lacked a final newline and the new file has one."""
+    current = ""
+    previous_side = ""
+    old_missing = new_missing = False
+    for raw in (diff or "").splitlines():
+        header = re.match(r"^diff --git a/(.+?) b/(.+)$", raw)
+        if header:
+            current = header.group(2)
+            previous_side = ""
+            continue
+        if current != path:
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            previous_side = "new"
+        elif raw.startswith("-") and not raw.startswith("---"):
+            previous_side = "old"
+        elif raw.startswith(" "):
+            previous_side = "both"
+        elif raw == r"\ No newline at end of file":
+            old_missing |= previous_side in {"old", "both"}
+            new_missing |= previous_side in {"new", "both"}
+    return old_missing and not new_missing
+
+
+def _trivial_change(change: FileChange, diff: str = "") -> bool:
+    """True only for an appended comment, whitespace, or final-newline cleanup."""
+    if change.is_new or change.is_deleted or change.is_binary:
+        return False
+    if _trailing_comment(change):
+        return True
+    before = [line.text.strip() for line in change.removed]
+    after = [line.text.strip() for line in change.added]
+    return ((bool(before or after) and before == after)
+            or _final_newline_fixed(diff, change.path))
+
+
+def concise_summary(
+    changes: Mapping[str, FileChange],
+    context: Mapping[str, Any],
+    *,
+    diff: str = "",
+) -> str:
+    """Explain a small diff in natural language instead of returning its path."""
+    paths = [str(p) for p in context.get("files") or [] if not is_noise(str(p))]
+    available = [changes[p] for p in paths if p in changes]
+    if len(available) == 1:
+        change = available[0]
+        filename = PurePosixPath(change.path).name
+        actions: list[str] = []
+        comment = _trailing_comment(change)
+        if comment:
+            actions.append(f"added `{comment}` as a trailing comment")
+        if _final_newline_fixed(diff, change.path):
+            actions.append("restored the final newline")
+        if actions:
+            if len(actions) == 1:
+                action_text = actions[0]
+            else:
+                action_text = ", ".join(actions[:-1]) + f" and {actions[-1]}"
+            summary = action_text[0].upper() + action_text[1:] + f" in `{filename}`."
+            if _trivial_change(change, diff):
+                summary += " This is a formatting-only change with no functional impact."
+            return summary
+
+        detail = describe_file(change)
+        _path, separator, explanation = detail.partition(" — ")
+        explanation = re.sub(r"\s*\(\+\d+/-\d+\)$", "", explanation).strip()
+        if separator and explanation and explanation not in {"content changed", "changed"}:
+            return f"Updated `{filename}`: {explanation}."
+    return ""
+
+
+def concise_title_subject(changes: Mapping[str, FileChange], *, diff: str = "") -> str:
+    """A short imperative title for confidently recognised, single-file edits."""
+    if len(changes) != 1:
+        return ""
+    change = next(iter(changes.values()))
+    filename = PurePosixPath(change.path).name
+    actions: list[str] = []
+    if _trailing_comment(change):
+        actions.append("add trailing comment")
+    if _final_newline_fixed(diff, change.path):
+        actions.append("restore final newline")
+    if not actions:
+        return ""
+    return " and ".join(actions) + f" in {filename}"
+
+
 def describe_file(change: FileChange, stats: Mapping[str, Any] | None = None) -> str:
     """One sentence about what a single file's change actually does.
 
@@ -363,7 +535,11 @@ def describe_file(change: FileChange, stats: Mapping[str, Any] | None = None) ->
     verb = "new file" if change.is_new else "deleted" if change.is_deleted else None
     parts: list[str] = []
 
-    if any(matches(pattern, path) for pattern in WORKFLOW_PATTERNS):
+    trailing_comment = _trailing_comment(change)
+    if trailing_comment:
+        parts.append(f"adds trailing comment `{trailing_comment}`")
+
+    if not parts and any(matches(pattern, path) for pattern in WORKFLOW_PATTERNS):
         facts = _workflow_facts(change)
         if facts["jobs_added"]:
             count = len(facts["jobs_added"])
@@ -379,16 +555,16 @@ def describe_file(change: FileChange, stats: Mapping[str, Any] | None = None) ->
             parts.append(f"triggers on {_join(facts['triggers_added'])}")
         if facts["actions_added"]:
             parts.append(f"uses {_join(facts['actions_added'], limit=3)}")
-    elif any(matches(pattern, path) for pattern in MANIFEST_PATTERNS):
+    elif not parts and any(matches(pattern, path) for pattern in MANIFEST_PATTERNS):
         parts.extend(_manifest_facts(change))
-    elif any(matches(pattern, path) for pattern in MIGRATION_PATTERNS):
+    elif not parts and any(matches(pattern, path) for pattern in MIGRATION_PATTERNS):
         parts.extend(_migration_facts(change))
         if not parts:
             parts.extend(
                 f"adds {kind} `{name}`" for kind, name in
                 _symbols(change.added, extension)[:2]
             )
-    else:
+    elif not parts:
         added_symbols = _symbols(change.added, extension)
         removed_symbols = _symbols(change.removed, extension)
         added_names = [name for _kind, name in added_symbols]
@@ -490,6 +666,7 @@ def at_a_glance(
     risk: str = "",
     risk_reason: str = "",
     insights: Mapping[str, Any] | None = None,
+    diff: str = "",
 ) -> str:
     """Two or three sentences that are not just the file list again."""
     from .changes import file_stats
@@ -505,6 +682,9 @@ def at_a_glance(
         for p in real
     ) or sum(len(changes[p].added) + len(changes[p].removed) for p in real if p in changes)
 
+    natural = concise_summary(changes, context, diff=diff)
+    if not (changes and all(_trivial_change(change, diff) for change in changes.values())):
+        natural = ""
     kind_word = {
         "feature": "Adds functionality", "fix": "Fixes a defect",
         "refactor": "Restructures existing code without changing behaviour",
@@ -516,7 +696,7 @@ def at_a_glance(
         f"{len(real)} {_plural('file', len(real))} across {_join(components, limit=3)}"
         if components else f"{len(real)} {_plural('file', len(real))}"
     )
-    sentences = [f"{kind_word} in {scope} ({reviewable_lines} changed "
+    sentences = [natural or f"{kind_word} in {scope} ({reviewable_lines} changed "
                  f"{_plural('line', reviewable_lines)})."]
     if noise_count:
         sentences.append(
@@ -604,6 +784,8 @@ def test_plan(
     tests: Mapping[str, Any] | None = None,
     commands: Sequence[str] = (),
     coverage: Mapping[str, Any] | None = None,
+    changes: Mapping[str, FileChange] | None = None,
+    diff: str = "",
 ) -> list[str]:
     """Numbered steps derived from what changed and what already covers it."""
     paths = [str(p) for p in context.get("files") or []]
@@ -626,7 +808,25 @@ def test_plan(
         if not is_noise(p) and any(matches(g, p) for g in MIGRATION_PATTERNS)
     ]
 
+    parsed = changes or {}
+    trivial = bool(parsed) and all(_trivial_change(change, diff) for change in parsed.values())
     steps: list[str] = []
+
+    if trivial:
+        ui_files = [
+            p for p in source
+            if PurePosixPath(p).suffix.lower() in {".jsx", ".tsx", ".vue", ".svelte"}
+        ]
+        if ui_files:
+            names = [PurePosixPath(path).stem for path in ui_files]
+            steps.append(
+                "Verify the " + _join(names, code=True)
+                + (" component renders correctly after the change."
+                   if len(names) == 1 else " components render correctly after the change.")
+            )
+        else:
+            steps.append("Confirm the changed file still parses or renders correctly.")
+        return steps
 
     # Tests that already exist for the changed files, matched on filename stem.
     related = _related_tests(source, inventory)

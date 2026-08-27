@@ -77,6 +77,36 @@ def test_metadata_wording_can_come_from_configured_template():
     assert metadata["risk_reason"] == "Small change."
 
 
+def test_small_formatting_diff_generates_explanation_title_and_test_advice():
+    path = "src/context/ToastContext.jsx"
+    context = {
+        **CONTEXT,
+        "title": "Update ToastContext.jsx",
+        "files": [path],
+        "commits": ["Update ToastContext.jsx"],
+        "additions": 1,
+        "deletions": 1,
+        "repository_tests": [],
+    }
+    diff = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n"
+        "@@ -1 +1 @@\n"
+        "-export default ToastContext;\n"
+        "\\ No newline at end of file\n"
+        "+export default ToastContext; #good\n"
+    )
+    metadata = generate_metadata(context, diff=diff)
+    assert metadata["title"] == (
+        "chore(src): add trailing comment and restore final newline in ToastContext.jsx"
+    )
+    assert metadata["summary"].startswith("Added `#good` as a trailing comment")
+    assert "no functional impact" in metadata["description"]
+    assert metadata["recommended_testing"] == [
+        "Verify the `ToastContext` component renders correctly after the change."
+    ]
+
+
 def test_review_rules_are_reproducible_and_anchorable():
     data = review_diff(CONTEXT, DIFF)
     rules = {finding["rule"] for finding in data["findings"]}

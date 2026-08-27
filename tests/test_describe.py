@@ -169,6 +169,27 @@ def test_a_file_with_no_recognisable_content_falls_back_to_its_kind():
     assert "styles updated" in describe.describe_file(change)
 
 
+def test_a_trailing_comment_and_final_newline_become_a_real_sentence():
+    path = "src/context/ToastContext.jsx"
+    diff = (
+        f"diff --git a/{path} b/{path}\n"
+        f"--- a/{path}\n+++ b/{path}\n"
+        "@@ -1 +1 @@\n"
+        "-export default ToastContext;\n"
+        "\\ No newline at end of file\n"
+        "+export default ToastContext; #good\n"
+    )
+    changes = parse_changes(diff)
+    summary = describe.concise_summary(changes, {"files": [path]}, diff=diff)
+    assert "Added `#good` as a trailing comment" in summary
+    assert "restored the final newline" in summary
+    assert "formatting-only change with no functional impact" in summary
+    assert "adds trailing comment `#good`" in describe.describe_file(changes[path])
+    assert describe.test_plan(
+        {"files": [path]}, changes=changes, diff=diff
+    ) == ["Verify the `ToastContext` component renders correctly after the change."]
+
+
 def test_the_line_counts_come_from_github_stats_when_given():
     change = _change("app/api.py", added=["def a():"])
     sentence = describe.describe_file(change, {"additions": 40, "deletions": 7})
