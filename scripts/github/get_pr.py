@@ -33,6 +33,7 @@ DEFAULT_MAX_COMMITS = 500
 DEFAULT_MAX_COMMENTS = 500
 DEFAULT_MAX_DIFF_BYTES = 2_000_000
 DEFAULT_MAX_TEST_FILES = 500
+DEFAULT_MAX_REVIEWS = 500
 
 #: Test-file patterns used to inventory the whole target tree. Test-gap analysis
 #: needs every existing test, not only the ones this PR happens to touch.
@@ -107,6 +108,12 @@ def build_context(client: GitHubClient, full_repo: str, number: int,
         label="issue comments",
     )
     labels = client.paginate(f"/repos/{full_repo}/issues/{number}/labels", label="labels")
+    reviews = client.paginate(
+        f"{base}/reviews",
+        limit=_limit(environ, "MAX_PR_REVIEWS", DEFAULT_MAX_REVIEWS),
+        label="reviews",
+    )
+    review_state = summarise_reviews(reviews, author=((pr.get("user") or {}).get("login") or ""))
 
     head_repo = ((pr.get("head") or {}).get("repo") or {})
     return {
@@ -159,6 +166,42 @@ def build_context(client: GitHubClient, full_repo: str, number: int,
             }
         ),
         "labels": sorted({(x.get("name") or "") for x in labels if isinstance(x, dict)}),
+        **review_state,
+    }
+
+
+def summarise_reviews(reviews: Any, *, author: str = "") -> dict[str, Any]:
+    """Collapse the review list into current approval state.
+
+    Only each reviewer's LATEST decisive review counts, which is how GitHub itself
+    resolves it: an APPROVED that was superseded by CHANGES_REQUESTED is not an
+    approval, and a later APPROVED clears an earlier CHANGES_REQUESTED. A
+    ``COMMENTED`` review is neither, so it never overwrites a decision.
+    """
+    latest: dict[str, str] = {}
+    commented: list[str] = []
+    author_key = (author or "").strip().lower()
+
+    for review in reviews or []:
+        if not isinstance(review, dict):
+            continue
+        login = ((review.get("user") or {}).get("login") or "").strip()
+        state = str(review.get("state") or "").strip().upper()
+        if not login or login.lower() == author_key:
+            # A self-review is not an approval by anyone else's standard.
+            continue
+        if state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[login] = state
+        elif state == "COMMENTED" and login not in commented:
+            commented.append(login)
+
+    approvals = sorted(name for name, state in latest.items() if state == "APPROVED")
+    changes = sorted(name for name, state in latest.items() if state == "CHANGES_REQUESTED")
+    return {
+        "approvals": approvals,
+        "changes_requested": changes,
+        "reviewed_by": sorted(set(list(latest) + commented)),
+        "review_count": len([r for r in reviews or [] if isinstance(r, dict)]),
     }
 
 
@@ -327,6 +370,14 @@ def main(argv: list[str] | None = None) -> int:
                 "From fork": "yes (writes to git are disabled)" if context["from_fork"] else "no",
                 "Draft": "yes" if context["draft"] else "no",
                 "Mergeable state": context["mergeable_state"] or "unknown",
+                "Approvals": (
+                    ", ".join(f"@{name}" for name in context["approvals"])
+                    or "none"
+                ),
+                "Changes requested by": (
+                    ", ".join(f"@{name}" for name in context["changes_requested"])
+                    or "nobody"
+                ),
                 "Changed files": len(context["files"]),
                 "Lines": f"+{context['additions'] or 0} / -{context['deletions'] or 0}",
                 "Commits": len(context["commits"]),

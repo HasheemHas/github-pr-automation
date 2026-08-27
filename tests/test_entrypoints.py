@@ -15,6 +15,13 @@ REPOS_YML = """
 repositories:
   yshrm:
     enabled: true
+    metadata:
+      sections: [at_glance, details, test_plan, type, user_impact, release_notes]
+      headings:
+        at_glance: Overview
+      template:
+        summary: "{subject}"
+        detail_item: "Update `{path}`."
     commands:
       install:
         - name: Frontend dependencies
@@ -72,7 +79,9 @@ def test_plan_writes_outputs_and_the_plan_artifact(tmp_path, artifacts, monkeypa
     assert written["action"] == "all"
     assert written["fix_allowed_paths"] == ["backend/**"]
     assert written["metadata_options"]["title_policy"] == "weak"
-    assert written["metadata_options"]["sections"][0] == "description"
+    assert written["metadata_options"]["sections"][0] == "at_glance"
+    assert written["metadata_options"]["headings"]["at_glance"] == "Overview"
+    assert written["metadata_options"]["template"]["summary"] == "{subject}"
     assert written["inline_comments"] is True
     # The plan output must be parseable by fromJSON() in the workflow.
     assert json.loads(values["plan"])["owner"] == "mycompany"

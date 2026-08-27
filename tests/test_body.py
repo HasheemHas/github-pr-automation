@@ -10,6 +10,7 @@ from scripts.github.body import (
     SUMMARY_START,
     render_block,
     upsert,
+    valid_headings,
     valid_sections,
 )
 
@@ -183,6 +184,46 @@ def test_valid_sections_returns_none_for_nothing_usable():
     assert valid_sections("description") is None
     assert valid_sections([]) is None
     assert valid_sections(["bogus", "also-bogus"]) is None
+
+
+def test_the_at_a_glance_template_renders_the_compact_pr_shape():
+    block = render_block(
+        FULL,
+        CONTEXT,
+        sections=["at_glance", "details", "test_plan", "type", "user_impact", "release_notes"],
+        headings={
+            "at_glance": "At a Glance",
+            "details": "Details",
+            "test_plan": "Test Plan",
+            "type": "Type",
+            "user_impact": "User Impact",
+        },
+    )
+    assert "## At a Glance" in block
+    assert "**Risk:** High" in block
+    assert "## Details" in block
+    assert "1. Log in, wait for expiry, attempt refresh" in block
+    assert "## Type\n\nFeature" in block
+    assert "## User Impact" not in block
+
+
+def test_configured_headings_override_the_visible_template_names():
+    block = render_block(
+        FULL,
+        CONTEXT,
+        sections=["at_glance"],
+        headings={"at_glance": "Overview"},
+    )
+    assert "## Overview" in block
+    assert "## At a Glance" not in block
+
+
+def test_valid_headings_filters_unknown_names():
+    assert valid_headings({"at_glance": "Overview", "bogus": "Nope"}) == {
+        "at_glance": "Overview"
+    }
+    assert valid_headings(None) is None
+    assert valid_headings([]) is None
 
 
 def test_the_default_order_leads_with_the_description():

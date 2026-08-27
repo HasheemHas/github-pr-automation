@@ -162,5 +162,6 @@ def test_codeowners_never_defers_on_an_empty_change_set():
 def test_to_dict_shape():
     payload = resolve_reviewers(GROUPS, ["backend/app/main.py"]).to_dict()
     assert set(payload) == {
-        "users", "teams", "matched_groups", "deferred_to_codeowners", "notes"
+        "users", "teams", "matched_groups", "deferred_to_codeowners", "notes",
+        "ownership", "suggested_users", "suggested_teams", "unowned_paths",
     }

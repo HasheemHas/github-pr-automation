@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping
 from ..common import summary
 from ..common.config import artifact_dir
 from ..common.errors import AutomationError
+from ..insights import run as insights
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _ISSUE = re.compile(r"(?<![\w/])(?:[A-Z][A-Z0-9]+-\d+|#\d+)\b")
@@ -93,7 +94,52 @@ def _components(paths: Iterable[str]) -> list[str]:
     return values[:10]
 
 
-def generate_metadata(context: Mapping[str, Any]) -> dict[str, Any]:
+class _SafeFormat(dict[str, Any]):
+    def __missing__(self, key: str) -> str:
+        return "{" + key + "}"
+
+
+def _template_text(template: Mapping[str, Any], key: str) -> str:
+    value = template.get(key)
+    return str(value if isinstance(value, str) else "")
+
+
+def _render_template(template: Mapping[str, Any], key: str, values: Mapping[str, Any]) -> str:
+    return _template_text(template, key).format_map(_SafeFormat(values)).strip()
+
+
+def _risk_reason(template: Mapping[str, Any], risk: str) -> str:
+    reasons = template.get("risk_reasons")
+    if not isinstance(reasons, Mapping):
+        return ""
+    return str(reasons.get(risk) or "").strip()
+
+
+def _render_list_template(
+    template: Mapping[str, Any],
+    key: str,
+    values: Iterable[str],
+    variable: str,
+    base_values: Mapping[str, Any],
+    *,
+    limit: int,
+) -> list[str]:
+    pattern = _template_text(template, key)
+    rendered: list[str] = []
+    for value in list(values)[:limit]:
+        data = dict(base_values)
+        data[variable] = value
+        text = pattern.format_map(_SafeFormat(data)).strip() if pattern else str(value).strip()
+        if text:
+            rendered.append(text)
+    return rendered
+
+
+def generate_metadata(
+    context: Mapping[str, Any],
+    template: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    template = template or {}
     paths = [str(p) for p in context.get("files") or []]
     components = _components(paths)
     kind = _change_type(context)
@@ -116,31 +162,42 @@ def generate_metadata(context: Mapping[str, Any]) -> dict[str, Any]:
         str(context.get("title") or ""), str(context.get("body") or ""), *commits
     ]))))
     component_text = ", ".join(components) if components else "the repository"
+    template_values = {
+        "subject": subject,
+        "components": component_text,
+        "component": component,
+        "change_type": kind,
+        "risk": risk.title(),
+        "risk_lower": risk,
+        "files": files,
+        "additions": additions,
+        "deletions": deletions,
+        "commits": len(commits),
+    }
     return {
         "title": title,
-        "summary": f"Updates {component_text} across {files} file(s) (+{additions}/-{deletions}).",
-        "description": (
-            f"This pull request updates {component_text}. The description is generated from "
-            "changed paths, commit messages, and GitHub change statistics."
-        ),
+        "summary": _render_template(template, "summary", template_values) or subject,
+        "description": _render_template(template, "description", template_values),
         "change_type": kind,
         "risk": risk,
-        "risk_reason": (
-            "Infrastructure, deployment, workflow, or migration files are affected."
-            if risk == "high" else
-            "The change is broad enough to require focused regression testing."
-            if risk == "medium" else
-            "The change is limited in file count and diff size."
-        ),
+        "risk_reason": _risk_reason(template, risk),
         "breaking_change": False,
         "breaking_change_details": "",
         "components": components,
-        "changes": [f"Changed `{p}`" for p in paths[:20]],
-        "release_notes": [f"Changed {subject}."],
-        "recommended_testing": [f"Run the configured checks for {c}." for c in components[:8]],
-        "review_focus": [f"Review `{p}`." for p in paths[:10]],
+        "changes": _render_list_template(
+            template, "detail_item", paths, "path", template_values, limit=20
+        ),
+        "release_notes": [note] if (note := _render_template(template, "release_note",
+                                                             template_values)) else [],
+        "recommended_testing": _render_list_template(
+            template, "testing_item", components, "component", template_values, limit=8
+        ),
+        "review_focus": _render_list_template(
+            template, "review_focus_item", paths, "path", template_values, limit=10
+        ),
         "migration_notes": [],
-        "rollback": "Revert the pull request commit and redeploy the previous revision.",
+        "rollback": _render_template(template, "rollback", template_values),
+        "user_impact": _render_template(template, "user_impact", template_values),
         "related_issues": refs,
     }
 
@@ -244,7 +301,11 @@ def analyse(plan: Mapping[str, Any], context: Mapping[str, Any], diff: str) -> d
         "engine": "deterministic-python-rules-v1",
     }
     if plan.get("metadata"):
-        result["metadata"] = {"status": "ok", "data": generate_metadata(context)}
+        options = plan.get("metadata_options") or {}
+        template = options.get("template") if isinstance(options, Mapping) else {}
+        if not isinstance(template, Mapping):
+            template = {}
+        result["metadata"] = {"status": "ok", "data": generate_metadata(context, template)}
     if plan.get("review") or plan.get("security"):
         security_only = bool(plan.get("security")) and not plan.get("review")
         result["review"] = {"status": "ok", "data": review_diff(context, diff,
@@ -252,6 +313,12 @@ def analyse(plan: Mapping[str, Any], context: Mapping[str, Any], diff: str) -> d
         result["review_scope"] = "security" if security_only else "full"
     if plan.get("tests"):
         result["tests"] = {"status": "ok", "data": analyse_tests(context)}
+    # Diff-based insights: size, secrets, dependencies, migrations, API, notes.
+    result.update(insights.run_all(plan, context, diff, plan.get("policies") or {}))
+    if plan.get("metadata"):
+        # The insights know more about risk and breakage than the path heuristics
+        # do, so the PR description is written from them where they ran.
+        enrich_metadata(result)
     if plan.get("fix"):
         findings = ((result.get("review") or {}).get("data") or {}).get("findings") or []
         fixable = [f for f in findings if f.get("rule") in {
@@ -267,23 +334,165 @@ def analyse(plan: Mapping[str, Any], context: Mapping[str, Any], diff: str) -> d
     return result
 
 
+def _section_data(result: Mapping[str, Any], key: str) -> dict[str, Any]:
+    """The ``data`` payload of one analysis section, or an empty mapping."""
+    entry = result.get(key)
+    if not isinstance(entry, Mapping) or entry.get("status") != "ok":
+        return {}
+    data = entry.get("data")
+    return dict(data) if isinstance(data, Mapping) else {}
+
+
+def enrich_metadata(result: dict[str, Any]) -> None:
+    """Fold insight findings into the generated PR metadata, in place.
+
+    The path-based heuristics in :func:`generate_metadata` are a fallback. Where
+    an insight actually measured something — the real risk level, a genuinely
+    breaking interface change, the migrations in this change — that measurement
+    replaces the guess, so the PR description and the report cannot disagree.
+    """
+    entry = result.get("metadata")
+    if not isinstance(entry, Mapping) or entry.get("status") != "ok":
+        return
+    metadata = entry.get("data")
+    if not isinstance(metadata, dict):
+        return
+
+    size_data = _section_data(result, "size")
+    if size_data.get("risk"):
+        metadata["risk"] = size_data["risk"]
+        metrics = size_data.get("metrics") or {}
+        areas = ", ".join(sorted(size_data.get("sensitive_areas") or {}))
+        metadata["risk_reason"] = (
+            f"{metrics.get('files_reviewable', 0)} reviewable file(s), "
+            f"{metrics.get('lines_reviewable', 0)} changed line(s)"
+            + (f"; touches {areas}" if areas else "")
+            + "."
+        )
+
+    api_data = _section_data(result, "api")
+    if api_data.get("breaking_change"):
+        metadata["breaking_change"] = True
+        breaking = [
+            f for f in api_data.get("findings") or []
+            if f.get("severity") in ("critical", "high")
+        ]
+        metadata["breaking_change_details"] = " ".join(
+            str(f.get("title", "")) + "." for f in breaking[:5]
+        ) or "Interface changes were detected in this pull request."
+
+    migration_data = _section_data(result, "migrations")
+    records = migration_data.get("migrations") or []
+    if records:
+        notes_list = [
+            f"`{record['path']}` ({record['framework']}"
+            + (", not reversible" if not record.get("reversible") else "")
+            + (f", {len(record.get('risky_operations') or [])} risky operation(s)"
+               if record.get("risky_operations") else "")
+            + ")"
+            for record in records[:10]
+        ]
+        metadata["migration_notes"] = notes_list
+
+    notes_data = _section_data(result, "release_notes")
+    generated = [
+        entry_text
+        for section in notes_data.get("sections") or []
+        for entry_text in section.get("entries") or []
+    ]
+    if generated:
+        metadata["release_notes"] = generated[:20]
+
+    secrets_data = _section_data(result, "secrets")
+    if secrets_data.get("hits"):
+        # A committed credential belongs at the top of the review focus list.
+        focus = [
+            f"Remove and rotate the credential at `{hit['path']}`:{hit['line']}."
+            for hit in secrets_data["hits"][:5]
+        ]
+        metadata["review_focus"] = focus + list(metadata.get("review_focus") or [])[:8]
+
+
+#: Section key -> label, in the order the job summary lists them.
+SUMMARY_SECTIONS = (
+    ("metadata", "Metadata"),
+    ("review", "Rule review"),
+    ("tests", "Test-gap analysis"),
+    ("size", "PR size and risk"),
+    ("secrets", "Secret scan"),
+    ("dependencies", "Dependency risk"),
+    ("migrations", "Migrations"),
+    ("api", "API compatibility"),
+    ("release_notes", "Release notes"),
+    ("fix", "Automatic fixes"),
+)
+
+
+def _detail(key: str, entry: Mapping[str, Any]) -> str:
+    """One line describing what a section found."""
+    data = entry.get("data") or {}
+    if entry.get("status") != "ok":
+        return str(entry.get("error") or entry.get("reason") or "")
+    if key == "review":
+        return f"{len(data.get('findings') or [])} reproducible finding(s)"
+    if key == "tests":
+        return f"{len(data.get('gaps') or [])} potential gap(s)"
+    if key == "metadata":
+        return "Summary generated"
+    # Every insight carries its own one-line summary.
+    return str(data.get("summary") or entry.get("reason") or "")
+
+
 def write_summary(result: Mapping[str, Any]) -> None:
     rows = []
-    for key, label in (("metadata", "Metadata"), ("review", "Rule review"),
-                       ("tests", "Test-gap analysis"), ("fix", "Automatic fixes")):
+    for key, label in SUMMARY_SECTIONS:
         entry = result.get(key)
-        if isinstance(entry, Mapping):
-            data = entry.get("data") or {}
-            detail = str(entry.get("reason") or "")
-            if key == "review" and entry.get("status") == "ok":
-                detail = f"{len(data.get('findings') or [])} reproducible finding(s)"
-            elif key == "tests" and entry.get("status") == "ok":
-                detail = f"{len(data.get('gaps') or [])} potential gap(s)"
-            rows.append([label, str(entry.get("status", "not_run")).upper(), detail])
-    summary.write(summary.heading("Deterministic PR analysis"),
-                  summary.definitions({"Engine": result.get("engine", "unknown"),
-                                       "External AI calls": "none"}),
-                  summary.table(["Section", "Status", "Detail"], rows))
+        if not isinstance(entry, Mapping):
+            continue
+        data = entry.get("data") or {}
+        status = str(data.get("status") or entry.get("status") or "not_run")
+        rows.append([label, status.upper(), _detail(key, entry)])
+
+    blocks = [
+        summary.heading("Deterministic PR analysis"),
+        summary.definitions({"Engine": result.get("engine", "unknown"),
+                             "External AI calls": "none"}),
+        summary.table(["Section", "Status", "Detail"], rows),
+    ]
+
+    # Findings from the insights, grouped so the run page explains each verdict
+    # without anyone opening analysis.json.
+    for key, label in SUMMARY_SECTIONS:
+        entry = result.get(key)
+        if not isinstance(entry, Mapping) or entry.get("status") != "ok":
+            continue
+        findings = ((entry.get("data") or {}).get("findings")) or []
+        if not findings:
+            continue
+        blocks.append(summary.details(
+            f"{label} — {len(findings)} finding(s)",
+            summary.table(
+                ["Severity", "File", "Finding", "Detail"],
+                [
+                    [
+                        f.get("severity", ""),
+                        f"`{f.get('path')}`" + (f":{f['line']}" if f.get("line") else "")
+                        if f.get("path") else "—",
+                        f.get("title", ""),
+                        f.get("detail", ""),
+                    ]
+                    for f in findings[:25]
+                ],
+            ),
+        ))
+
+    notes_entry = result.get("release_notes")
+    if isinstance(notes_entry, Mapping) and notes_entry.get("status") == "ok":
+        markdown = ((notes_entry.get("data") or {}).get("markdown") or "").strip()
+        if markdown:
+            blocks.append(summary.details("Generated release notes", markdown))
+
+    summary.write(*blocks)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -299,7 +508,20 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     result = analyse(plan, context, diff)
     (out_dir / "analysis.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+
+    # Release notes also travel as a standalone file so a release job can consume
+    # them without parsing analysis.json.
+    markdown = (_section_data(result, "release_notes").get("markdown") or "").strip()
+    if markdown:
+        (out_dir / "release-notes.md").write_text(markdown + "\n", encoding="utf-8")
+
     write_summary(result)
+    for key, label in SUMMARY_SECTIONS:
+        entry = result.get(key)
+        if isinstance(entry, Mapping):
+            data = entry.get("data") or {}
+            status = str(data.get("status") or entry.get("status") or "not_run")
+            print(f"{label}: {status.upper()} — {_detail(key, entry)}")
     print("Deterministic analysis complete; no external AI service was called.")
     return 0
 

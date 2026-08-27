@@ -144,6 +144,9 @@ def _context_routes(files=None):
         "GET /repos/org/repo/pulls/1/comments?per_page=100": ([], {}),
         "GET /repos/org/repo/issues/1/comments?per_page=100": ([{"body": "hi"}], {}),
         "GET /repos/org/repo/issues/1/labels?per_page=100": ([{"name": "backend"}], {}),
+        "GET /repos/org/repo/pulls/1/reviews?per_page=100": (
+            [{"user": {"login": "approver"}, "state": "APPROVED"}], {},
+        ),
     }
 
 
@@ -157,6 +160,8 @@ def test_build_context_collects_every_paginated_collection():
     assert context["existing_reviewers"] == ["existing"]
     assert context["existing_reviewer_teams"] == ["existing-team"]
     assert context["from_fork"] is False
+    assert context["approvals"] == ["approver"]
+    assert context["changes_requested"] == []
 
 
 def test_build_context_flags_a_fork():

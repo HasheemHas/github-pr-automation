@@ -23,16 +23,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from ..common import readiness as readiness_module
 from ..common import summary
 from ..common.config import artifact_dir, reviewer_groups
 from ..common.errors import AutomationError, GitHubError
 from ..common.labels import derive_labels, missing_labels
-from ..common.reviewers import resolve_reviewers
+from ..common.reviewers import DEFAULT_CODEOWNERS_MODE, resolve_reviewers
 from ..common.titles import title_decision
 from .api import GitHubClient
 from .body import SUMMARY_END, SUMMARY_START
 from .body import upsert as upsert_body
-from .body import valid_sections
+from .body import valid_headings, valid_sections
 from .diffmap import parse_diff, split_anchored
 
 REPORT_MARKER = "<!-- pr-automation-report -->"
@@ -51,6 +52,24 @@ SEVERITY_ICON = {
 }
 
 PASS, FAIL, NOT_RUN, ERROR, PARTIAL = "PASS", "FAIL", "NOT RUN", "ERROR", "PARTIAL"
+#: An advisory row. Deliberately does NOT degrade the overall verdict: a 700-line
+#: pull request or a widened dependency range is information for a reviewer, not a
+#: reason to turn the branch-protection check amber on every second merge.
+WARN = "WARN"
+
+#: Insight status -> gate section status.
+INSIGHT_STATUS = {
+    "pass": PASS, "warn": WARN, "fail": FAIL, "not_run": NOT_RUN, "error": ERROR,
+}
+
+#: Analysis key -> (section name, plan flag). Order is the report's order.
+INSIGHT_SECTIONS: tuple[tuple[str, str, str], ...] = (
+    ("secrets", "Secret scan", "secrets"),
+    ("size", "PR size", "size"),
+    ("dependencies", "Dependency risk", "deps"),
+    ("migrations", "Migrations", "migrations"),
+    ("api", "API compatibility", "api"),
+)
 
 
 def finding_key(finding: Mapping[str, Any]) -> str:
@@ -119,11 +138,44 @@ def _group_status(quality: Mapping[str, Any] | None, group: str) -> Section:
     return Section(label, PASS, f"{len(results)} command(s) passed")
 
 
+def _insight_section(name: str, entry: Mapping[str, Any] | None, requested: bool
+                     ) -> tuple[Section, dict[str, Any]]:
+    """Turn one insight payload into a gate section plus its data."""
+    if not requested:
+        return Section(name, NOT_RUN, "Not requested for this action."), {}
+    if not isinstance(entry, Mapping):
+        return Section(name, NOT_RUN, "Deterministic analysis produced no result."), {}
+    if entry.get("status") != "ok":
+        detail = str(entry.get("error") or entry.get("reason") or "")
+        return Section(name, ERROR, detail), {}
+    data = entry.get("data") or {}
+    status = INSIGHT_STATUS.get(str(data.get("status")), ERROR)
+    detail = str(data.get("summary") or "")
+    counts = data.get("counts") or {}
+    blocking = int(counts.get("critical") or 0) + int(counts.get("high") or 0)
+    if blocking:
+        detail += f"; {blocking} high/critical finding(s)"
+    return Section(name, status, detail), dict(data)
+
+
+def _result_section(name: str, payload: Mapping[str, Any] | None, requested: bool
+                    ) -> Section:
+    """A section from a validation-job result file (coverage, flaky)."""
+    if not requested:
+        return Section(name, NOT_RUN, "Not requested for this action.")
+    if not isinstance(payload, Mapping):
+        return Section(name, NOT_RUN, "The validation job produced no result.")
+    status = INSIGHT_STATUS.get(str(payload.get("status")), ERROR)
+    return Section(name, status, str(payload.get("reason") or ""))
+
+
 def build_sections(
     plan: Mapping[str, Any],
     analysis: Mapping[str, Any] | None,
     quality: Mapping[str, Any] | None,
     security: Mapping[str, Any] | None,
+    coverage: Mapping[str, Any] | None = None,
+    flaky: Mapping[str, Any] | None = None,
 ) -> tuple[list[Section], dict[str, Any]]:
     """Build the gate sections and the counts the report needs."""
     sections: list[Section] = []
@@ -178,6 +230,27 @@ def build_sections(
     if tests is not None:
         sections.append(Section("Test coverage", PASS, f"{len(gaps)} potential gap(s)"))
 
+    # Deterministic insights. Each is its own row so a reviewer can see at a glance
+    # which dimension is unhappy.
+    insight_data: dict[str, Any] = {}
+    for key, name, flag in INSIGHT_SECTIONS:
+        section, data = _insight_section(name, analysis.get(key), bool(plan.get(flag)))
+        sections.append(section)
+        insight_data[flag] = data
+
+    notes_entry = analysis.get("release_notes")
+    release_notes = (
+        dict(notes_entry.get("data") or {})
+        if isinstance(notes_entry, Mapping) and notes_entry.get("status") == "ok"
+        else {}
+    )
+
+    # Insights that needed the checked-out tree.
+    sections.append(_result_section(
+        "Changed-line coverage", coverage, bool(plan.get("coverage"))
+    ))
+    sections.append(_result_section("Flaky tests", flaky, bool(plan.get("flaky"))))
+
     # Scanners.
     if not plan.get("security"):
         sections.append(Section("Security", NOT_RUN, "Not requested for this action."))
@@ -215,8 +288,14 @@ def build_sections(
         for group in ("lint", "test", "build"):
             sections.append(_group_status(quality, group))
 
-    return sections, {"findings": findings, "counts": counts, "gaps": gaps,
-                      "metadata": metadata, "review": review, "tests": tests}
+    return sections, {
+        "findings": findings, "counts": counts, "gaps": gaps,
+        "metadata": metadata, "review": review, "tests": tests,
+        "insights": insight_data,
+        "release_notes": release_notes,
+        "coverage": dict(coverage) if isinstance(coverage, Mapping) else {},
+        "flaky": dict(flaky) if isinstance(flaky, Mapping) else {},
+    }
 
 
 def overall(sections: Iterable[Section]) -> str:
@@ -224,18 +303,28 @@ def overall(sections: Iterable[Section]) -> str:
 
     PARTIAL must propagate: a scanner that was enabled but could not run, or a
     review that could not cover every file, is not a pass.
+
+    WARN does not propagate. An advisory insight — a large diff, a widened
+    dependency range — must not turn the branch-protection check amber, or the
+    check stops meaning anything. Those surface in the merge-readiness summary
+    instead, where a human reads them.
     """
     items = list(sections)
     if any(section.status == FAIL for section in items):
         return FAIL
     if any(section.status in (ERROR, PARTIAL) for section in items):
         return PARTIAL
-    if any(section.status == PASS for section in items):
+    if any(section.status in (PASS, WARN) for section in items):
         return PASS
     return NOT_RUN
 
 
-def render_check_output(sections: list[Section], counts: Mapping[str, int], verdict: str) -> str:
+def render_check_output(
+    sections: list[Section],
+    counts: Mapping[str, int],
+    verdict: str,
+    readiness: readiness_module.Readiness | None = None,
+) -> str:
     lines = [f"{CHECK_NAME}", ""]
     for section in sections:
         lines.append(f"{section.name}")
@@ -246,7 +335,153 @@ def render_check_output(sections: list[Section], counts: Mapping[str, int], verd
     lines.append(f"High findings\n{counts.get('high', 0)}")
     lines.append("")
     lines.append(f"Overall\n{verdict}")
+    if readiness is not None:
+        lines.extend(["", readiness_module.render_check_text(readiness)])
     return "\n".join(lines)
+
+
+def render_reviewers(full_name: str, reviewers: Mapping[str, Any]) -> str:
+    """The reviewer line, including CODEOWNERS-derived suggestions."""
+    owner = full_name.split("/")[0]
+    requested = [f"@{u}" for u in reviewers.get("users") or []]
+    requested += [f"@{owner}/{t}" for t in reviewers.get("teams") or []]
+    suggested = [f"@{u}" for u in reviewers.get("suggested_users") or []]
+    suggested += [f"@{owner}/{t}" for t in reviewers.get("suggested_teams") or []]
+
+    parts: list[str] = []
+    if requested:
+        parts.append("requested " + ", ".join(requested))
+    if reviewers.get("deferred_to_codeowners"):
+        parts.append("CODEOWNERS covers every changed file, so GitHub assigns the owners")
+    if suggested and not requested:
+        parts.append("CODEOWNERS owners: " + ", ".join(suggested))
+    elif suggested:
+        parts.append("also owned by " + ", ".join(suggested))
+    if not parts:
+        notes = reviewers.get("notes") or []
+        return "; ".join(str(note) for note in notes[:2]) or "_None requested._"
+    return "; ".join(parts)
+
+
+def render_ownership(reviewers: Mapping[str, Any]) -> str:
+    """A per-owner file breakdown, collapsed."""
+    ownership = reviewers.get("ownership") or {}
+    per_owner = ownership.get("per_owner") or []
+    unowned = ownership.get("unowned") or []
+    if not per_owner and not unowned:
+        return ""
+    body = "\n".join(f"- {line}" for line in per_owner) or "_No owner matched._"
+    if unowned:
+        body += (
+            f"\n\n**Not covered by CODEOWNERS ({len(unowned)}):** "
+            + ", ".join(f"`{path}`" for path in unowned[:15])
+            + ("…" if len(unowned) > 15 else "")
+        )
+    rules = ownership.get("matched_rules") or []
+    if rules:
+        body += "\n\n**Matched rules:** " + ", ".join(f"`{rule}`" for rule in rules[:15])
+    return f"<details><summary>File ownership ({len(per_owner)} owner(s))</summary>\n\n{body}\n\n</details>"
+
+
+def render_insight_details(data: Mapping[str, Any]) -> str:
+    """Collapsible blocks for each insight that found something."""
+    blocks: list[str] = []
+    insights = data.get("insights") or {}
+
+    for flag, title in (
+        ("secrets", "Detected credentials"),
+        ("api", "Interface changes"),
+        ("migrations", "Migration checks"),
+        ("deps", "Dependency changes"),
+        ("size", "Size and risk"),
+    ):
+        payload = insights.get(flag) or {}
+        findings = payload.get("findings") or []
+        if not findings:
+            continue
+        rows = "\n".join(
+            f"- **{f.get('severity')}** "
+            + (f"`{f.get('path')}`" + (f":{f['line']}" if f.get("line") else "") + " — "
+               if f.get("path") else "")
+            + f"{f.get('title')}"
+            + (f"\n  {f.get('detail')}" if f.get("detail") else "")
+            for f in findings[:20]
+        )
+        extra = ""
+        if flag == "secrets":
+            extra = (
+                "\n\n_Values are masked and never stored by this automation. Rotate every "
+                "credential listed above: removing the line does not remove it from git "
+                "history._"
+            )
+        if flag == "deps":
+            packages = payload.get("packages") or []
+            if packages:
+                extra = "\n\n" + summary.table(
+                    ["Package", "Change", "From", "To", "Ecosystem"],
+                    [
+                        [f"`{p['name']}`", p["kind"], p["from"] or "—", p["to"] or "—",
+                         p.get("ecosystem", "")]
+                        for p in packages[:30]
+                    ],
+                )
+        blocks.append(
+            f"<details><summary>{title} ({len(findings)})</summary>\n\n{rows}{extra}\n\n</details>"
+        )
+
+    coverage = data.get("coverage") or {}
+    analysis = coverage.get("analysis") or {}
+    files = [f for f in analysis.get("files") or [] if f.get("uncovered_count")]
+    if files:
+        rows = summary.table(
+            ["File", "Covered", "Measured", "%", "Uncovered lines"],
+            [
+                [f"`{f['path']}`", f["covered_lines"], f["measured_lines"],
+                 "—" if f["percent"] is None else f"{f['percent']}%",
+                 ", ".join(str(n) for n in f["uncovered_lines"][:12])
+                 + ("…" if f["uncovered_count"] > 12 else "")]
+                for f in files[:25]
+            ],
+        )
+        blocks.append(
+            f"<details><summary>Changed lines with no test coverage "
+            f"({analysis.get('uncovered_lines', 0)})</summary>\n\n{rows}\n\n</details>"
+        )
+    unmeasured = analysis.get("unmeasured_files") or []
+    if unmeasured:
+        rows = "\n".join(
+            f"- `{item['path']}` — {item['added_lines']} added line(s)"
+            for item in unmeasured[:20]
+        )
+        blocks.append(
+            f"<details><summary>Changed files absent from every coverage report "
+            f"({len(unmeasured)})</summary>\n\n{rows}\n\n</details>"
+        )
+
+    flaky = (data.get("flaky") or {}).get("analysis") or {}
+    for key, title in (
+        ("flaky", "Flaky tests"),
+        ("consistent_failures", "Consistent test failures (not flaky)"),
+    ):
+        entries = flaky.get(key) or []
+        if not entries:
+            continue
+        rows = "\n".join(
+            f"- `{entry['identifier']}` — {entry.get('reason', '')}"
+            for entry in entries[:25]
+        )
+        blocks.append(
+            f"<details><summary>{title} ({len(entries)})</summary>\n\n{rows}\n\n</details>"
+        )
+
+    notes = data.get("release_notes") or {}
+    markdown = (notes.get("markdown") or "").strip()
+    if markdown:
+        blocks.append(
+            f"<details><summary>Draft release notes</summary>\n\n{markdown}\n\n</details>"
+        )
+
+    return "\n\n".join(blocks)
 
 
 def render_comment(
@@ -261,6 +496,7 @@ def render_comment(
     metadata_outcome: Mapping[str, Any] | None = None,
     inline_outcome: Mapping[str, Any] | None = None,
     unanchored: list[Mapping[str, Any]] | None = None,
+    readiness: readiness_module.Readiness | None = None,
 ) -> str:
     counts = data["counts"]
     rows = "\n".join(
@@ -321,31 +557,44 @@ def render_comment(
             + "\n"
         )
 
-    reviewer_line = "_None requested._"
-    if reviewers.get("deferred_to_codeowners"):
-        reviewer_line = "CODEOWNERS already covers every changed file."
-    elif reviewers.get("users") or reviewers.get("teams"):
-        names = [f"@{u}" for u in reviewers.get("users", [])]
-        names += [f"@{full_name.split('/')[0]}/{t}" for t in reviewers.get("teams", [])]
-        reviewer_line = ", ".join(names)
-    elif reviewers.get("notes"):
-        reviewer_line = "; ".join(reviewers["notes"])
+    reviewer_line = render_reviewers(full_name, reviewers)
+    ownership_block = render_ownership(reviewers)
+    insight_blocks = render_insight_details(data)
+
+    # The readiness verdict goes first: it is the one line most readers need.
+    readiness_block = (
+        readiness_module.render_markdown(readiness) + "\n\n" if readiness is not None else ""
+    )
+
+    coverage_summary = ""
+    coverage_payload = (data.get("coverage") or {}).get("analysis") or {}
+    if coverage_payload.get("denominator"):
+        percent = coverage_payload.get("changed_line_coverage")
+        coverage_summary = (
+            f"\n**Changed-line coverage:** {percent}% "
+            f"({coverage_payload.get('covered_lines', 0)}/"
+            f"{coverage_payload.get('denominator', 0)} line(s))\n"
+        )
 
     return (
         f"{REPORT_MARKER}\n"
         f"## 🤖 PR Automation Report\n\n"
         f"**Target:** `{full_name}` PR #{number}\n\n"
-        f"| Check | Status | Detail |\n| --- | --- | --- |\n{rows}\n\n"
-        f"**Overall:** **{verdict}**\n"
-        f"{coverage_line}{title_line}{inline_line}\n"
+        f"{readiness_block}"
+        f"<details><summary>All checks ({len(sections)})</summary>\n\n"
+        f"| Check | Status | Detail |\n| --- | --- | --- |\n{rows}\n\n</details>\n\n"
+        f"**Quality gate:** **{verdict}**\n"
+        f"{coverage_summary}{coverage_line}{title_line}{inline_line}\n"
         f"**Labels:** {', '.join(f'`{x}`' for x in labels) or '_none_'}\n\n"
         f"**Reviewers:** {reviewer_line}\n\n"
-        f"<details><summary>Findings "
+        + (f"{ownership_block}\n\n" if ownership_block else "")
+        + f"<details><summary>Rule findings "
         f"(critical {counts['critical']}, high {counts['high']}, medium {counts['medium']}, "
         f"low {counts['low']})</summary>\n\n{findings_block}\n\n</details>\n\n"
         f"<details><summary>Potential test gaps ({len(data['gaps'])})</summary>\n\n"
         f"{gaps_block}\n\n</details>\n\n"
-        f"Human approval is still required before merge."
+        + (f"{insight_blocks}\n\n" if insight_blocks else "")
+        + "Human approval is still required before merge."
     )
 
 
@@ -356,6 +605,7 @@ def upsert_summary(
     *,
     context: Mapping[str, Any] | None = None,
     sections: list[str] | None = None,
+    headings: Mapping[str, str] | None = None,
 ) -> str:
     """Replace the managed description block, preserving author-written text.
 
@@ -365,7 +615,7 @@ def upsert_summary(
     payload = dict(metadata)
     if not (payload.get("description") or "").strip():
         payload["description"] = summary
-    return upsert_body(body, payload, context, sections=sections)
+    return upsert_body(body, payload, context, sections=sections, headings=headings)
 
 
 class Reporter:
@@ -420,6 +670,7 @@ class Reporter:
         title_policy: str = "weak",
         context: Mapping[str, Any] | None = None,
         sections: list[str] | None = None,
+        headings: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Update the PR description, and the title when the human one is a placeholder."""
         summary = (metadata.get("summary") or "").strip()
@@ -436,7 +687,8 @@ class Reporter:
 
         payload: dict[str, Any] = {
             "body": upsert_summary(
-                pr.get("body") or "", summary, metadata, context=context, sections=sections
+                pr.get("body") or "", summary, metadata, context=context, sections=sections,
+                headings=headings
             )
         }
         if replace:
@@ -581,10 +833,21 @@ class Reporter:
         else:
             self.client.post(f"{self._repo_path}/issues/{self.number}/comments", {"body": body})
 
-    def publish_check(self, head_sha: str, verdict: str, text: str, summary: str) -> None:
-        """Publish the gate against the TARGET head SHA."""
+    def publish_check(self, head_sha: str, verdict: str, text: str, summary: str,
+                      *, readiness_verdict: str = "") -> None:
+        """Publish the gate against the TARGET head SHA.
+
+        The conclusion still comes from the quality gate alone: readiness includes
+        human approvals and mergeability, which branch protection already enforces
+        on its own, and a check run that fails for a missing approval would
+        deadlock against it. Readiness appears in the title and body, where it
+        informs without gating twice.
+        """
         conclusion = {"PASS": "success", "PARTIAL": "neutral",
                       "NOT RUN": "neutral"}.get(verdict, "failure")
+        title = f"Overall: {verdict}"
+        if readiness_verdict:
+            title = f"{readiness_verdict} · gate {verdict}"
         self.client.post(
             f"{self._repo_path}/check-runs",
             {
@@ -592,7 +855,7 @@ class Reporter:
                 "head_sha": head_sha,
                 "status": "completed",
                 "conclusion": conclusion,
-                "output": {"title": f"Overall: {verdict}", "summary": summary, "text": text},
+                "output": {"title": title[:255], "summary": summary, "text": text},
             },
         )
 
@@ -609,15 +872,42 @@ def write_gate_summary(
     inline_outcome: Mapping[str, Any],
     unanchored: list[Mapping[str, Any]],
     notes: list[str],
+    readiness: readiness_module.Readiness | None = None,
 ) -> None:
     """Render the whole gate into the Actions job summary."""
     counts = data["counts"]
     pr_link = f"https://github.com/{full_name}/pull/{number}"
     blocks = [
-        summary.heading(f"{summary.icon(verdict)} Quality Gate: {verdict}"),
-        summary.definitions(
-            {"Pull request": f"[{full_name}#{number}]({pr_link})", "Check run": f"`{CHECK_NAME}`"}
+        summary.heading(
+            f"{readiness.icon} Merge readiness: {readiness.verdict}" if readiness
+            else f"{summary.icon(verdict)} Quality Gate: {verdict}"
         ),
+        summary.definitions(
+            {"Pull request": f"[{full_name}#{number}]({pr_link})", "Check run": f"`{CHECK_NAME}`",
+             "Quality gate": f"{summary.icon(verdict)} {verdict}"}
+        ),
+    ]
+    if readiness is not None:
+        blocks.append(summary.table(
+            ["Dimension", "Status", "Blocking", "Detail"],
+            [
+                [d.name, f"{d.icon} {d.status.replace('_', ' ').upper()}",
+                 "yes" if d.blocking else "no", d.detail]
+                for d in readiness.dimensions
+            ],
+        ))
+        if readiness.blockers:
+            blocks.append(
+                "> [!CAUTION]\n> Blocking this merge:\n"
+                + "\n".join(f"> - {item}" for item in readiness.blockers)
+            )
+        if readiness.warnings:
+            blocks.append(summary.details(
+                f"Needs a look ({len(readiness.warnings)})",
+                summary.bullets(readiness.warnings, limit=30),
+            ))
+    blocks += [
+        summary.heading("Checks", 3),
         summary.table(
             ["Check", "Status", "Detail"],
             [[s.name, f"{summary.icon(s.status)} {s.status}", s.detail] for s in sections],
@@ -644,6 +934,10 @@ def write_gate_summary(
                 + [f"@{t}" for t in reviewers.get("teams") or []]
             ) or "none requested"
         ),
+        "CODEOWNERS owners": ", ".join(
+            [f"@{u}" for u in reviewers.get("suggested_users") or []]
+            + [f"@{t}" for t in reviewers.get("suggested_teams") or []]
+        ) or "none identified",
         "Inline comments": (
             f"{inline_outcome.get('posted', 0)} posted"
             + (f", {inline_outcome.get('skipped_existing', 0)} already present"
@@ -688,6 +982,73 @@ def write_gate_summary(
             summary.details(f"Potential test gaps ({len(data['gaps'])})",
                             summary.bullets(data["gaps"]))
         )
+
+    # Each insight's own findings, so the run page explains every advisory row.
+    for flag, label in (
+        ("secrets", "Detected credentials"),
+        ("api", "Interface changes"),
+        ("migrations", "Migration checks"),
+        ("deps", "Dependency changes"),
+        ("size", "Size and risk"),
+    ):
+        payload = (data.get("insights") or {}).get(flag) or {}
+        insight_findings = payload.get("findings") or []
+        if not insight_findings:
+            continue
+        blocks.append(summary.details(
+            f"{label} ({len(insight_findings)})",
+            summary.table(
+                ["Severity", "File", "Finding", "Detail"],
+                [
+                    [
+                        f.get("severity", ""),
+                        (f"`{f['path']}`" + (f":{f['line']}" if f.get("line") else ""))
+                        if f.get("path") else "—",
+                        f.get("title", ""),
+                        f.get("detail", ""),
+                    ]
+                    for f in insight_findings[:30]
+                ],
+            ),
+            open_by_default=flag == "secrets",
+        ))
+
+    coverage_analysis = (data.get("coverage") or {}).get("analysis") or {}
+    if coverage_analysis.get("denominator"):
+        blocks.append(summary.details(
+            f"Changed-line coverage "
+            f"({coverage_analysis.get('changed_line_coverage')}%)",
+            summary.table(
+                ["File", "Covered", "Measured", "%", "Uncovered lines"],
+                [
+                    [f"`{f['path']}`", f["covered_lines"], f["measured_lines"],
+                     "—" if f["percent"] is None else f"{f['percent']}%",
+                     ", ".join(str(n) for n in f["uncovered_lines"][:12])]
+                    for f in coverage_analysis.get("files") or []
+                ][:30],
+            ),
+        ))
+
+    flaky_analysis = (data.get("flaky") or {}).get("analysis") or {}
+    if flaky_analysis.get("flaky") or flaky_analysis.get("consistent_failures"):
+        blocks.append(summary.details(
+            f"Flaky tests ({len(flaky_analysis.get('flaky') or [])}) and consistent "
+            f"failures ({len(flaky_analysis.get('consistent_failures') or [])})",
+            summary.table(
+                ["Test", "Kind", "Why"],
+                [
+                    [f"`{entry['identifier']}`", kind, entry.get("reason", "")]
+                    for kind, key in (("flaky", "flaky"),
+                                      ("failing", "consistent_failures"))
+                    for entry in (flaky_analysis.get(key) or [])[:20]
+                ],
+            ),
+        ))
+
+    release_notes = (data.get("release_notes") or {}).get("markdown") or ""
+    if release_notes.strip():
+        blocks.append(summary.details("Draft release notes", release_notes.strip()))
+
     if notes:
         blocks.append(summary.details(f"Notes ({len(notes)})", summary.bullets(notes, limit=30)))
 
@@ -714,12 +1075,15 @@ def main(argv: list[str] | None = None) -> int:
     analysis = _read_json(out_dir / "analysis.json")
     quality = _read_json(out_dir / "quality-result.json")
     security = _read_json(out_dir / "security-result.json")
+    coverage = _read_json(out_dir / "coverage-result.json")
+    flaky = _read_json(out_dir / "flaky-result.json")
+    conflicts = _read_json(out_dir / "conflicts.json")
 
     owner, repo = plan.get("owner", ""), plan.get("repo") or plan.get("repository", "")
     number = int(context["number"])
     head_sha = str(env.get("TARGET_REPORT_HEAD_SHA") or context["head_sha"])
 
-    sections, data = build_sections(plan, analysis, quality, security)
+    sections, data = build_sections(plan, analysis, quality, security, coverage, flaky)
     verdict = overall(sections)
 
     client = GitHubClient(token)
@@ -748,6 +1112,7 @@ def main(argv: list[str] | None = None) -> int:
             title_policy=str(options.get("title_policy") or "weak"),
             context=context,
             sections=valid_sections(options.get("sections")),
+            headings=valid_headings(options.get("headings")),
         )
 
     # Inline review comments, anchored only to lines that are genuinely in the diff.
@@ -783,11 +1148,24 @@ def main(argv: list[str] | None = None) -> int:
             codeowners=codeowners_file.read_text(encoding="utf-8")
             if codeowners_file.is_file()
             else None,
+            codeowners_mode=str(
+                (plan.get("reviewer_options") or {}).get("codeowners")
+                or DEFAULT_CODEOWNERS_MODE
+            ),
         )
         reviewers = request.to_dict()
         if not request.deferred_to_codeowners and not request.empty:
             accepted = reporter.request_reviewers(request.users, request.teams)
             reviewers["users"], reviewers["teams"] = accepted["users"], accepted["teams"]
+
+    # The merge-readiness verdict: one answer, assembled from every section plus
+    # the two things only GitHub knows — approvals and mergeability.
+    readiness = readiness_module.assess(
+        sections=[{"name": s.name, "status": s.status, "detail": s.detail} for s in sections],
+        context=context,
+        conflicts=conflicts,
+        config=(plan.get("policies") or {}).get("readiness") or {},
+    )
 
     reviewers["notes"] = list(reviewers.get("notes") or []) + reporter.notes
     comment = render_comment(
@@ -801,20 +1179,27 @@ def main(argv: list[str] | None = None) -> int:
         metadata_outcome=metadata_outcome,
         inline_outcome=inline_outcome,
         unanchored=unanchored,
+        readiness=readiness,
     )
     reporter.upsert_comment(comment)
 
     counts = data["counts"]
     summary = (
-        f"{len(data['findings'])} finding(s); critical {counts['critical']}, "
+        f"Merge readiness: {readiness.verdict}. "
+        f"{len(data['findings'])} rule finding(s); critical {counts['critical']}, "
         f"high {counts['high']}; test gaps {len(data['gaps'])}."
     )
+    if readiness.blockers:
+        summary += " Blocking: " + "; ".join(readiness.blockers[:5])
     reporter.publish_check(
-        head_sha, verdict, render_check_output(sections, counts, verdict), summary
+        head_sha, verdict,
+        render_check_output(sections, counts, verdict, readiness), summary,
+        readiness_verdict=readiness.verdict,
     )
 
     gate = {
         "overall": verdict,
+        "readiness": readiness.to_dict(),
         "sections": [{"name": s.name, "status": s.status, "detail": s.detail} for s in sections],
         "counts": counts,
         "metadata": metadata_outcome,
@@ -825,18 +1210,32 @@ def main(argv: list[str] | None = None) -> int:
             "complete": (data.get("review") or {}).get("complete"),
             "unreviewed_paths": (data.get("review") or {}).get("unreviewed_paths") or [],
         },
+        "changed_line_coverage": (
+            (data.get("coverage") or {}).get("analysis") or {}
+        ).get("changed_line_coverage"),
+        "secrets_found": len(((data.get("insights") or {}).get("secrets") or {}).get("hits") or []),
+        "reviewers": {
+            "requested_users": reviewers.get("users") or [],
+            "requested_teams": reviewers.get("teams") or [],
+            "codeowners_users": reviewers.get("suggested_users") or [],
+            "codeowners_teams": reviewers.get("suggested_teams") or [],
+            "unowned_paths": reviewers.get("unowned_paths") or [],
+        },
         "notes": reporter.notes,
     }
     (out_dir / "gate.json").write_text(json.dumps(gate, indent=2) + "\n", encoding="utf-8")
 
     write_gate_summary(
         f"{owner}/{repo}", number, sections, data, verdict, labels, reviewers,
-        metadata_outcome, inline_outcome, unanchored, reporter.notes,
+        metadata_outcome, inline_outcome, unanchored, reporter.notes, readiness,
     )
 
     for section in sections:
         print(f"{section.name}: {section.status}")
-    print(f"Overall: {verdict}")
+    print(f"Quality gate: {verdict}")
+    print(f"Merge readiness: {readiness.verdict}")
+    for blocker in readiness.blockers:
+        print(f"  blocking: {blocker}")
     # Publishing a failed target gate is a successful reporting operation. The
     # target check run already carries conclusion=failure and is what branch
     # protection should enforce. Returning 1 here incorrectly makes the reporter

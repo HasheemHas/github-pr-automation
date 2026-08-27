@@ -21,6 +21,7 @@ from .common.config import (
 )
 from .common.dispatch import plan as build_plan
 from .common.errors import AutomationError
+from .common.reviewers import CODEOWNERS_MODES, DEFAULT_CODEOWNERS_MODE
 from .github import body
 
 TITLE_POLICIES = ("weak", "always", "never")
@@ -35,8 +36,31 @@ STEP_ORDER = (
     "security",
     "quality",
     "tests",
+    "coverage",
+    "size",
+    "secrets",
+    "deps",
+    "migrations",
+    "api",
+    "flaky",
+    "notes",
     "fix",
     "resolve_conflicts",
+)
+
+#: Config blocks the deterministic-analysis and report jobs need. They travel
+#: inside the plan so those jobs never have to resolve the target config
+#: themselves, which keeps ``config/repositories.yml`` read in exactly one place.
+POLICY_BLOCKS = (
+    "size_policy",
+    "secret_scan",
+    "dependency_policy",
+    "migration_policy",
+    "api_policy",
+    "release_notes",
+    "readiness",
+    "coverage",
+    "flaky",
 )
 
 #: Paths an AI-authored patch may never touch, whatever the target config says.
@@ -72,6 +96,24 @@ def patch_allowlist(config: Mapping[str, Any], key: str) -> list[str]:
             continue
         allowed.append(candidate)
     return allowed
+
+
+def collect_policies(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy the insight policy blocks out of the resolved target config.
+
+    Only mappings are carried: a malformed block is dropped with a warning rather
+    than travelling downstream to fail inside an insight.
+    """
+    policies: dict[str, Any] = {}
+    for name in POLICY_BLOCKS:
+        value = config.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, Mapping):
+            print(f"::warning::Config block {name!r} is not a mapping; ignoring it.")
+            continue
+        policies[name] = dict(value)
+    return policies
 
 
 def write_outputs(values: Mapping[str, str], env: Mapping[str, str]) -> None:
@@ -117,13 +159,30 @@ def main(argv: list[str] | None = None) -> int:
             "::warning::metadata.sections lists no recognised section names; "
             "using the default description layout."
         )
+    metadata_template = metadata_config.get("template") or {}
+    if not isinstance(metadata_template, Mapping):
+        print("::warning::metadata.template is not a mapping; ignoring it.")
+        metadata_template = {}
     execution["metadata_options"] = {
         "title_policy": policy,
         "sections": sections or list(body.DEFAULT_SECTIONS),
+        "headings": body.valid_headings(metadata_config.get("headings")) or {},
+        "template": dict(metadata_template),
     }
 
     review_config = target.config.get("review") or {}
     execution["inline_comments"] = bool(review_config.get("inline_comments", True))
+
+    execution["policies"] = collect_policies(target.config)
+    reviewers_config = target.config.get("reviewers") or {}
+    mode = str(reviewers_config.get("codeowners") or DEFAULT_CODEOWNERS_MODE).strip().lower()
+    if mode not in CODEOWNERS_MODES:
+        print(
+            f"::warning::Unknown reviewers.codeowners mode {mode!r}; "
+            f"falling back to {DEFAULT_CODEOWNERS_MODE!r}."
+        )
+        mode = DEFAULT_CODEOWNERS_MODE
+    execution["reviewer_options"] = {"codeowners": mode}
 
     # Patch pipelines require a working sandbox: target commands must not be able
     # to reach the validation artifacts that decide whether a patch is pushed.
@@ -163,6 +222,12 @@ def main(argv: list[str] | None = None) -> int:
             "run_security": str(execution["security"]).lower(),
             "run_quality": str(execution["quality"]).lower(),
             "run_tests": str(execution["tests"]).lower(),
+            "run_coverage": str(execution["coverage"]).lower(),
+            "run_flaky": str(execution["flaky"]).lower(),
+            "run_insights": str(
+                any(execution[step] for step in ("size", "secrets", "deps", "migrations",
+                                                 "api", "notes"))
+            ).lower(),
             "run_fix": str(execution["fix"]).lower(),
             "run_resolve_conflicts": str(execution["resolve_conflicts"]).lower(),
             "sandbox_enabled": str(sandbox_config.usable).lower(),
@@ -199,6 +264,11 @@ def main(argv: list[str] | None = None) -> int:
                     else "not configured (required for `fix` / `resolve-conflicts`)"
                 ),
                 "Title policy": f"`{policy}`",
+                "CODEOWNERS mode": f"`{mode}`",
+                "Configured policies": (
+                    ", ".join(f"`{name}`" for name in sorted(execution["policies"]))
+                    or "none (built-in defaults apply)"
+                ),
             }
         ),
     )

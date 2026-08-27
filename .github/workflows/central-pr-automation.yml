@@ -43,7 +43,26 @@ on:
         required: true
         default: all
         type: choice
-        options: [all, metadata, labels, reviewers, review, security, quality, tests, fix, resolve-conflicts]
+        options:
+          - all
+          - metadata
+          - labels
+          - reviewers
+          - review
+          - security
+          - quality
+          - tests
+          - insights
+          - size
+          - secrets
+          - deps
+          - migrations
+          - api
+          - notes
+          - coverage
+          - flaky
+          - fix
+          - resolve-conflicts
 
 # Least privilege at the workflow level. Every write to the target repository goes
 # through a short-lived GitHub App installation token, never through GITHUB_TOKEN.
@@ -77,6 +96,9 @@ jobs:
       needs_merge_probe: ${{ steps.plan.outputs.needs_merge_probe }}
       run_quality: ${{ steps.plan.outputs.run_quality }}
       run_security: ${{ steps.plan.outputs.run_security }}
+      run_coverage: ${{ steps.plan.outputs.run_coverage }}
+      run_flaky: ${{ steps.plan.outputs.run_flaky }}
+      run_insights: ${{ steps.plan.outputs.run_insights }}
       run_fix: ${{ steps.plan.outputs.run_fix }}
       run_resolve_conflicts: ${{ steps.plan.outputs.run_resolve_conflicts }}
       sandbox_enabled: ${{ steps.plan.outputs.sandbox_enabled }}
@@ -215,7 +237,9 @@ jobs:
           name: pr-automation-analysis
           retention-days: 7
           if-no-files-found: warn
-          path: ${{ runner.temp }}/pr-automation-artifacts/analysis.json
+          path: |
+            ${{ runner.temp }}/pr-automation-artifacts/analysis.json
+            ${{ runner.temp }}/pr-automation-artifacts/release-notes.md
 
   # --------------------------------------------- prepare-validation-source -----
   # Holds a read-only App token for the checkout, then hands the working tree on
@@ -354,6 +378,8 @@ jobs:
       needs.prepare-validation-source.result == 'success' &&
       (needs.plan.outputs.run_quality == 'true' ||
        needs.plan.outputs.run_security == 'true' ||
+       needs.plan.outputs.run_coverage == 'true' ||
+       needs.plan.outputs.run_flaky == 'true' ||
        needs.plan.outputs.needs_privileged_write == 'true')
     runs-on: ubuntu-latest
     # contents: read is the minimum that lets this job check out THIS repository.
@@ -455,6 +481,31 @@ jobs:
           DETECTED_COMMANDS_FILE: ${{ runner.temp }}/pr-automation-artifacts/detected-commands.json
           SECURITY_RESULT_FILE: ${{ runner.temp }}/pr-automation-artifacts/security-result.json
         run: python -m scripts.security.run
+      # Coverage runs AFTER the quality suite, because it reads the report that
+      # suite produced. It only parses files; it runs no target command unless the
+      # repository configures coverage.command.
+      - name: Measure changed-line coverage
+        if: needs.plan.outputs.run_coverage == 'true'
+        continue-on-error: true
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          TARGET_WORKDIR: target
+          CONFIG_FILE: ${{ github.workspace }}/config/repositories.yml
+          PR_DIFF_FILE: ${{ runner.temp }}/pr-automation-artifacts/pr.diff
+          COVERAGE_RESULT_FILE: ${{ runner.temp }}/pr-automation-artifacts/coverage-result.json
+        run: python -m scripts.coverage.run
+      # Flaky detection repeats the test suite, so it runs last and only when
+      # explicitly requested.
+      - name: Detect flaky tests
+        if: needs.plan.outputs.run_flaky == 'true'
+        continue-on-error: true
+        env:
+          TARGET_REPOSITORY: ${{ inputs.repository }}
+          TARGET_WORKDIR: target
+          CONFIG_FILE: ${{ github.workspace }}/config/repositories.yml
+          DETECTED_COMMANDS_FILE: ${{ runner.temp }}/pr-automation-artifacts/detected-commands.json
+          FLAKY_RESULT_FILE: ${{ runner.temp }}/pr-automation-artifacts/flaky-result.json
+        run: python -m scripts.flaky.run
       # Only the result JSON files leave this job. Never the source, never a log
       # dump, never the runner temp directory.
       - name: Upload validation results
@@ -467,6 +518,8 @@ jobs:
           path: |
             ${{ runner.temp }}/pr-automation-artifacts/quality-result.json
             ${{ runner.temp }}/pr-automation-artifacts/security-result.json
+            ${{ runner.temp }}/pr-automation-artifacts/coverage-result.json
+            ${{ runner.temp }}/pr-automation-artifacts/flaky-result.json
       - name: Upload the validated patch
         uses: actions/upload-artifact@v6
         if: always() && needs.plan.outputs.needs_privileged_write == 'true'
@@ -485,7 +538,7 @@ jobs:
   # distinct outcomes, all rendered as NOT RUN rather than a crash.
   report-to-target:
     name: report-to-target
-    needs: [plan, resolve-target, deterministic-analysis, validate-target, deterministic-resolve, privileged-fix-write]
+    needs: [plan, resolve-target, prepare-validation-source, deterministic-analysis, validate-target, deterministic-resolve, privileged-fix-write]
     if: always() && needs.plan.result == 'success' && needs.resolve-target.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -528,6 +581,15 @@ jobs:
         continue-on-error: true
         with:
           name: pr-automation-validation
+          path: ${{ runner.temp }}/pr-automation-artifacts
+      # The merge probe result, when one was taken. Without it, merge readiness
+      # falls back to GitHub's own mergeable_state.
+      - name: Download merge conflict probe
+        uses: actions/download-artifact@v7
+        if: needs.plan.outputs.needs_merge_probe == 'true' && needs.prepare-validation-source.result != 'skipped'
+        continue-on-error: true
+        with:
+          name: pr-automation-conflicts
           path: ${{ runner.temp }}/pr-automation-artifacts
       - name: Mint a short-lived write token for the target repository
         id: app-token

@@ -8,8 +8,8 @@ Design rules:
     opens with the description itself
   * a section with no content is omitted, not padded with "None" or "N/A"; the
     exception is Breaking Changes, where "None" is real information
-  * the section set and order are configurable per repository via
-    ``metadata.sections`` in config/repositories.yml
+  * the section set, order and headings are configurable per repository via
+    ``metadata.sections`` and ``metadata.headings`` in config/repositories.yml
   * a short italic footer says it is generated, so nobody mistakes it for prose
     a human typed
 """
@@ -44,6 +44,27 @@ DEFAULT_SECTIONS = (
 )
 
 RISK_ICON = {"low": "🟢", "medium": "🟡", "high": "🔴"}
+DEFAULT_HEADINGS = {
+    "description": "Description",
+    "change_type": "Change Type",
+    "risk": "Risk",
+    "components": "Components",
+    "changes": "Changes",
+    "release_notes": "Release Notes",
+    "breaking": "Breaking Changes",
+    "migration": "Migration Notes",
+    "testing": "Recommended Testing",
+    "review_focus": "Review Focus",
+    "rollback": "Rollback",
+    "related_issues": "Related Issues",
+    "stats": "Change Stats",
+}
+
+
+def _heading_for(name: str, headings: Mapping[str, str] | None = None) -> str:
+    configured = headings or {}
+    value = configured.get(name) or DEFAULT_HEADINGS.get(name) or name.replace("_", " ").title()
+    return str(value).strip()
 
 
 def _bullets(values: Sequence[str]) -> str:
@@ -60,18 +81,18 @@ def _section(title: str, body: str) -> str:
 
 # -- individual sections ---------------------------------------------------
 
-def _description(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
+def _description(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
     # Prefer the long description; fall back to the summary so this is never empty.
     text = (meta.get("description") or "").strip() or (meta.get("summary") or "").strip()
-    return _section("Description", text)
+    return _section(heading, text)
 
 
-def _change_type(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
+def _change_type(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
     value = (meta.get("change_type") or "").strip()
-    return _section("Change Type", value) if value else ""
+    return _section(heading, value) if value else ""
 
 
-def _risk(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
+def _risk_line(meta: Mapping[str, Any]) -> str:
     level = (meta.get("risk") or "").strip()
     if not level:
         return ""
@@ -80,52 +101,57 @@ def _risk(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
     body = f"{icon} **{level}**".strip()
     if reason:
         body += f" — {reason}"
-    return _section("Risk", body)
+    return body
 
 
-def _components(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
+def _risk(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    body = _risk_line(meta)
+    return _section(heading, body)
+
+
+def _components(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
     values = meta.get("components") or []
-    return _section("Components", ", ".join(f"`{v}`" for v in values)) if values else ""
+    return _section(heading, ", ".join(f"`{v}`" for v in values)) if values else ""
 
 
-def _changes(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
-    return _section("Changes", _bullets(meta.get("changes") or []))
+def _changes(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    return _section(heading, _bullets(meta.get("changes") or []))
 
 
-def _release_notes(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
-    return _section("Release Notes", _bullets(meta.get("release_notes") or []))
+def _release_notes(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    return _section(heading, _bullets(meta.get("release_notes") or []))
 
 
-def _breaking(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
+def _breaking(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
     # Always stated: "no breaking changes" is information a release manager needs.
     if not meta.get("breaking_change"):
-        return _section("Breaking Changes", "None.")
+        return _section(heading, "None.")
     details = (meta.get("breaking_change_details") or "").strip()
-    return _section("Breaking Changes", f"⚠️ **Yes.** {details}".strip())
+    return _section(heading, f"⚠️ **Yes.** {details}".strip())
 
 
-def _migration(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
-    return _section("Migration Notes", _bullets(meta.get("migration_notes") or []))
+def _migration(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    return _section(heading, _bullets(meta.get("migration_notes") or []))
 
 
-def _testing(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
-    return _section("Recommended Testing", _bullets(meta.get("recommended_testing") or []))
+def _testing(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    return _section(heading, _bullets(meta.get("recommended_testing") or []))
 
 
-def _review_focus(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
-    return _section("Review Focus", _bullets(meta.get("review_focus") or []))
+def _review_focus(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    return _section(heading, _bullets(meta.get("review_focus") or []))
 
 
-def _rollback(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
-    return _section("Rollback", (meta.get("rollback") or "").strip())
+def _rollback(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    return _section(heading, (meta.get("rollback") or "").strip())
 
 
-def _related_issues(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
+def _related_issues(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
     values = meta.get("related_issues") or []
-    return _section("Related Issues", ", ".join(str(v) for v in values)) if values else ""
+    return _section(heading, ", ".join(str(v) for v in values)) if values else ""
 
 
-def _stats(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
+def _stats(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
     """Deterministic facts from the PR itself."""
     if not context:
         return ""
@@ -136,10 +162,68 @@ def _stats(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
         ("Commits", len(context.get("commits") or [])),
     ]
     body = " · ".join(f"**{label}:** {value}" for label, value in rows)
-    return _section("Change Stats", body)
+    return _section(heading, body)
 
 
-RENDERERS: dict[str, Callable[[Mapping[str, Any], Mapping[str, Any]], str]] = {
+def _numbered(values: Sequence[str]) -> str:
+    return "\n".join(f"{index}. {value}" for index, value in enumerate(values, start=1)
+                     if str(value).strip())
+
+
+def _at_glance(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    rows = []
+    level = (meta.get("risk") or "").strip()
+    if level:
+        rows.append(f"**Risk:** {level.title()}")
+    changes = list(meta.get("changes") or [])
+    if meta.get("review_focus"):
+        changes.extend(list(meta.get("review_focus") or [])[:1])
+    body = "\n\n".join(part for part in (rows[0] if rows else "", _bullets(changes[:5])) if part)
+    return _section(heading, body)
+
+
+def _details(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    values = meta.get("details") or meta.get("changes") or []
+    return _section(heading, _bullets(values))
+
+
+def _behaviour(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    rows = meta.get("behaviour") or meta.get("behavior") or []
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)) or not rows:
+        return ""
+    table_rows = []
+    for row in rows:
+        if isinstance(row, Mapping):
+            table_rows.append([
+                str(row.get("job_type") or row.get("type") or ""),
+                str(row.get("rendered") or row.get("value") or ""),
+                str(row.get("cleanup") or row.get("owner") or ""),
+            ])
+    if not table_rows:
+        return ""
+    body = (
+        "| Job type | `ttlSecondsAfterFinished` rendered | Cleaned up by |\n"
+        "| --- | --- | --- |\n"
+        + "\n".join(f"| {a} | {b} | {c} |" for a, b, c in table_rows)
+    )
+    return _section(heading, body)
+
+
+def _test_plan(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    values = meta.get("test_plan") or meta.get("recommended_testing") or []
+    return _section(heading, _numbered(values))
+
+
+def _type(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    value = (meta.get("type") or meta.get("change_type") or "").strip()
+    return _section(heading, value.title() if value else "")
+
+
+def _user_impact(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
+    return _section(heading, (meta.get("user_impact") or "").strip())
+
+
+RENDERERS: dict[str, Callable[[Mapping[str, Any], Mapping[str, Any], str], str]] = {
     "description": _description,
     "change_type": _change_type,
     "risk": _risk,
@@ -153,6 +237,13 @@ RENDERERS: dict[str, Callable[[Mapping[str, Any], Mapping[str, Any]], str]] = {
     "rollback": _rollback,
     "related_issues": _related_issues,
     "stats": _stats,
+    "at_glance": _at_glance,
+    "details": _details,
+    "behaviour": _behaviour,
+    "behavior": _behaviour,
+    "test_plan": _test_plan,
+    "type": _type,
+    "user_impact": _user_impact,
 }
 
 
@@ -161,6 +252,7 @@ def render_block(
     context: Mapping[str, Any] | None = None,
     *,
     sections: Sequence[str] | None = None,
+    headings: Mapping[str, str] | None = None,
 ) -> str:
     """Render the managed block, markers included."""
     order = list(sections) if sections else list(DEFAULT_SECTIONS)
@@ -169,7 +261,7 @@ def render_block(
         renderer = RENDERERS.get(name)
         if renderer is None:
             continue
-        block = renderer(metadata, context or {})
+        block = renderer(metadata, context or {}, _heading_for(name, headings))
         if block.strip():
             rendered.append(block.strip())
     body = "\n\n".join(rendered)
@@ -182,6 +274,7 @@ def upsert(
     context: Mapping[str, Any] | None = None,
     *,
     sections: Sequence[str] | None = None,
+    headings: Mapping[str, str] | None = None,
 ) -> str:
     """Replace the managed block in ``body``, preserving everything else.
 
@@ -193,7 +286,7 @@ def upsert(
         body or "",
         flags=re.DOTALL,
     ).rstrip()
-    block = render_block(metadata, context, sections=sections)
+    block = render_block(metadata, context, sections=sections, headings=headings)
     return f"{stripped}\n\n{block}" if stripped else block
 
 
@@ -205,3 +298,15 @@ def valid_sections(declared: Any) -> list[str] | None:
         return None
     names = [str(name).strip() for name in declared if str(name).strip()]
     return [name for name in names if name in RENDERERS] or None
+
+
+def valid_headings(declared: Any) -> dict[str, str] | None:
+    """Validate configured section headings, ignoring unknown section names."""
+    if declared is None or not isinstance(declared, Mapping):
+        return None
+    result = {
+        str(key).strip(): str(value).strip()
+        for key, value in declared.items()
+        if str(key).strip() in RENDERERS and str(value).strip()
+    }
+    return result or None

@@ -28,11 +28,145 @@ defaults:
     trivy: false
   metadata:
     title_policy: weak
+    # PR description template. The Python code only fills these placeholders:
+    # {subject}, {components}, {component}, {change_type}, {risk}, {risk_lower},
+    # {files}, {additions}, {deletions}, {commits}, {path}.
+    sections:
+      - at_glance
+      - details
+      - behaviour
+      - test_plan
+      - type
+      - user_impact
+      - release_notes
+    headings:
+      at_glance: At a Glance
+      details: Details
+      behaviour: Behaviour
+      test_plan: Test Plan
+      type: Type
+      user_impact: User Impact
+      release_notes: Release Notes
+    template:
+      summary: "{subject}"
+      description: "{subject}"
+      detail_item: "Update `{path}`."
+      release_note: "{subject}."
+      testing_item: "Run the configured checks for `{component}`."
+      review_focus_item: "Review `{path}`."
+      rollback: "Revert the pull request commit and redeploy the previous revision."
+      user_impact: "No consumer impact is known from the changed files. Review the PR diff for behaviour-specific impact."
+      risk_reasons:
+        high: "Sensitive, deployment, infrastructure, workflow, Docker, or migration files are affected."
+        medium: "The change is broad enough to require focused regression testing."
+        low: "The change is limited in file count and diff size."
   review:
     inline_comments: true
   sandbox:
     enabled: false
     image: ''
+
+  # ---------------------------------------------------------------- reviewers --
+  reviewers:
+    # defer   report CODEOWNERS ownership, let GitHub request the owners (default)
+    # request request the CODEOWNERS owners explicitly as well
+    # ignore  do not read CODEOWNERS at all
+    codeowners: defer
+
+  # ------------------------------------------------------------ size and risk --
+  # Advisory by default: it reports, it does not block. Set fail_on_violation to
+  # true to turn a breach of max_files / max_lines into a failing gate.
+  size_policy:
+    warn_files: 20          # above this, the PR is flagged as large
+    warn_lines: 500
+    max_files: 60           # above this, it is a policy breach
+    max_lines: 1500
+    max_commits: 0          # 0 disables the commit-count check
+    max_concerns: 2         # unrelated areas before "mixed change" is reported
+    fail_on_violation: false
+    count_generated: false  # lock files and vendored trees are counted separately
+    # ignore_paths: []      # excluded from the counts entirely
+    # generated_paths: []   # overrides the built-in generated-file list
+
+  # -------------------------------------------------------------- secret scan --
+  # Runs on the added lines in the analysis job, with no binary to provision.
+  # Complements gitleaks; it is not a replacement for it. Detected values are
+  # masked and are never written to a log, an artifact or a PR comment.
+  secret_scan:
+    enabled: true
+    fail_on: high           # critical | high | medium | low, or '' to never fail
+    min_entropy: 3.0        # applies only to the generic, non-provider patterns
+    max_findings: 100
+    # allow_paths: []       # added to the built-in example/fixture allowlist
+
+  # -------------------------------------------------------- dependency change --
+  dependency_policy:
+    enabled: true
+    fail_on: ''             # '' = advisory; set to high to block
+    allow_major_bumps: true
+    allow_vcs_sources: false
+    # allow_packages: []    # glob patterns exempt from reporting
+
+  # ---------------------------------------------------------------- migrations --
+  migration_policy:
+    enabled: true
+    fail_on: ''             # '' = advisory; set to high to block
+    require_rollback: true  # a new migration should have a reverse path
+    require_naming: true
+    max_per_pr: 0           # 0 disables the count check
+    allow_editing_applied: false
+    # ignore_paths: []
+
+  # ----------------------------------------------------- API compatibility ----
+  api_policy:
+    enabled: true
+    fail_on: ''             # '' = advisory; set to high to block breaking changes
+    check_routes: true
+    check_symbols: true
+    check_schemas: true
+    # internal_paths: []    # added to the built-in internal/test path list
+    # public_paths: []      # when set, ONLY these paths are checked
+
+  # -------------------------------------------------- changed-line coverage ----
+  # Measures whether the lines this PR adds are executed by a test. Needs the
+  # test command to emit a coverage report; formats supported are Cobertura XML,
+  # LCOV, coverage.py JSON, Istanbul JSON, JaCoCo, Clover and Go coverprofile.
+  coverage:
+    enabled: true
+    min_changed_line_coverage: 0   # 0 = measure and report only, never fail
+    fail_under: true               # false = warn instead of fail
+    min_changed_lines: 10          # below this, the percentage is not enforced
+    treat_unmeasured_as_uncovered: false
+    # command: ''                  # optional command that produces the report
+    # reports: []                  # explicit report globs; empty = auto-discover
+    # exclude_paths: []            # added to the built-in test/generated excludes
+
+  # ------------------------------------------------------------ flaky tests ----
+  # OFF by default: it re-runs the whole test suite `runs` times.
+  flaky:
+    enabled: false
+    runs: 3
+    fail_on_flaky: false
+    # command: ''                  # defaults to the configured test commands
+    # reports: []                  # JUnit XML globs; empty = auto-discover
+
+  # --------------------------------------------------------- release notes ----
+  release_notes:
+    enabled: true
+    include_issue_refs: true
+    include_internal: false        # true also lists chore/ci/test commits
+    max_per_section: 25
+
+  # ------------------------------------------------------- merge readiness ----
+  # The single ready / not ready answer. `block_on` names the dimensions that
+  # hold the merge; a dimension that is enabled but did NOT run also holds it,
+  # because a check that never ran is not a pass.
+  #   review conflicts draft lint test build dependencies_install security
+  #   secrets coverage flaky tests review_rules api migrations deps size metadata
+  readiness:
+    require_approvals: 1
+    allow_draft: false
+    block_on: [lint, test, build, security, secrets, conflicts, review]
   # Auto-fix stays off by default: `action=fix` needs both a sandbox image and a
   # non-empty allowlist, so an unconfigured repository can never be written to.
   fix_allowed_paths: []
@@ -90,21 +224,38 @@ repositories:
       #   release_notes  breaking   migration  testing     review_focus
       #   rollback     related_issues  stats
       sections:
-        - description
-        - change_type
-        - risk
-        - components
-        - changes
+        - at_glance
+        - details
+        - behaviour
+        - test_plan
+        - type
+        - user_impact
         - release_notes
-        - breaking
-        - migration
-        - testing
-        - review_focus
-        - rollback
-        - related_issues
-        - stats
     review:
       inline_comments: true
+    # Only the keys that differ from `defaults:` need restating; nested blocks
+    # merge key by key.
+    coverage:
+      enabled: true
+      # The backend test command needs to emit a report for this to measure
+      # anything; pytest-cov writes coverage.xml with --cov-report=xml.
+      command: >-
+        sh -c 'if [ -d backend/tests ] || [ -d tests ];
+        then python -m pytest -q --cov --cov-report=xml:coverage.xml || true;
+        else echo "no python tests configured"; fi'
+      reports:
+        - coverage.xml
+        - frontend/coverage/lcov.info
+        - admin/coverage/lcov.info
+      # Start advisory. Raise this once the baseline is known, then set
+      # fail_under: true to make it a gate.
+      min_changed_line_coverage: 0
+    size_policy:
+      warn_files: 25
+      warn_lines: 600
+    readiness:
+      require_approvals: 1
+      block_on: [lint, test, build, security, secrets, conflicts, review]
     # Container isolation for target-controlled commands. The validation job holds
     # no credentials either way; this stops target code reaching the central
     # scripts or the validation artifacts. REQUIRED for action=fix and

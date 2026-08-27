@@ -55,6 +55,28 @@ def test_metadata_uses_only_repository_facts():
     assert "backend" in metadata["components"]
 
 
+def test_metadata_wording_can_come_from_configured_template():
+    metadata = generate_metadata(
+        CONTEXT,
+        {
+            "summary": "{subject}",
+            "detail_item": "Update `{path}`.",
+            "release_note": "{subject}.",
+            "testing_item": "Check `{component}`.",
+            "review_focus_item": "Review `{path}`.",
+            "rollback": "Use the configured rollback runbook.",
+            "user_impact": "No known consumer impact.",
+            "risk_reasons": {"low": "Small change."},
+        },
+    )
+    assert metadata["summary"] == "Prevent token reuse"
+    assert metadata["changes"][0] == "Update `backend/auth.py`."
+    assert metadata["recommended_testing"] == ["Check `backend`."]
+    assert metadata["rollback"] == "Use the configured rollback runbook."
+    assert metadata["user_impact"] == "No known consumer impact."
+    assert metadata["risk_reason"] == "Small change."
+
+
 def test_review_rules_are_reproducible_and_anchorable():
     data = review_diff(CONTEXT, DIFF)
     rules = {finding["rule"] for finding in data["findings"]}
