@@ -18,7 +18,9 @@ from typing import Any, Iterable, Mapping
 from ..common import summary
 from ..common.config import artifact_dir
 from ..common.errors import AutomationError
-from ..insights import run as insights
+from ..insights import describe
+from ..insights import run as insights_run
+from ..insights.changes import parse_changes
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _ISSUE = re.compile(r"(?<![\w/])(?:[A-Z][A-Z0-9]+-\d+|#\d+)\b")
@@ -79,7 +81,12 @@ def _change_type(context: Mapping[str, Any]) -> str:
         return "fix"
     if any(word in text for word in ("refactor", "cleanup", "restructure")):
         return "refactor"
-    if any(word in text for word in ("add", "feature", "implement", "support", "introduce")):
+    # "Show generated metadata" and "Automatically detect conflicts" are features;
+    # classifying them as chores understated every such pull request.
+    if any(word in text for word in (
+        "add", "feature", "implement", "support", "introduce", "show", "display",
+        "detect", "expose", "enable", "generate", "report",
+    )):
         return "feature"
     return "chore"
 
@@ -138,30 +145,54 @@ def _render_list_template(
 def generate_metadata(
     context: Mapping[str, Any],
     template: Mapping[str, Any] | None = None,
+    *,
+    diff: str = "",
+    insights: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Build the PR metadata, deriving the prose from the diff.
+
+    ``diff`` is what makes the description say something: without it there is
+    nothing to read but the path list, and the result degrades to the same
+    file-name summary the old template produced. ``insights`` lets the description
+    reuse what the other checks already established — routes, migrations,
+    dependency bumps — instead of re-deriving it.
+
+    ``template`` is an override layer, applied only where a key is set. It is
+    never the source of the content.
+    """
     template = template or {}
+    changes = parse_changes(diff) if diff else {}
     paths = [str(p) for p in context.get("files") or []]
     components = _components(paths)
+    # Build artefacts are not work and must not be described as changes.
+    reviewable = [p for p in paths if not describe.is_noise(p)]
+    reviewable_components = _components(reviewable) or components
     kind = _change_type(context)
     commits = [str(c).strip() for c in context.get("commits") or [] if str(c).strip()]
     subject = commits[0] if commits else str(context.get("title") or "Update repository")
     subject = re.sub(r"^(?:feat|fix|chore|docs|test|refactor)(?:\([^)]*\))?!?:\s*", "", subject,
                      flags=re.IGNORECASE).strip().rstrip(".")
-    component = components[0] if len(components) == 1 else "repository"
+    component = (
+        reviewable_components[0] if len(reviewable_components) == 1 else "repository"
+    )
     prefix = {"feature": "feat", "documentation": "docs"}.get(kind, kind)
     title = f"{prefix}({component}): {subject[:180]}"
     files = len(paths)
     additions = int(context.get("additions") or 0)
     deletions = int(context.get("deletions") or 0)
+    # Risk is judged on files a human has to review, so a refreshed lock file or a
+    # committed .pyc cannot inflate it.
     risk = "high" if any(
         p.startswith((".github/", "terraform/", "helm/", "migrations/"))
         or PurePosixPath(p).name.lower() in {"dockerfile", "docker-compose.yml"}
-        for p in paths
-    ) else "medium" if files > 10 or additions + deletions > 500 else "low"
+        for p in reviewable
+    ) else "medium" if len(reviewable) > 10 or additions + deletions > 500 else "low"
     refs = sorted(set(_ISSUE.findall(" ".join([
         str(context.get("title") or ""), str(context.get("body") or ""), *commits
     ]))))
-    component_text = ", ".join(components) if components else "the repository"
+    component_text = (
+        ", ".join(reviewable_components) if reviewable_components else "the repository"
+    )
     template_values = {
         "subject": subject,
         "components": component_text,
@@ -174,30 +205,60 @@ def generate_metadata(
         "deletions": deletions,
         "commits": len(commits),
     }
+    derived_risk_reason = describe.risk_reason(context, risk, insights=insights)
+    # Details describe each file; At a Glance summarises the change as a whole. The
+    # two must never be the same list, which is what a single `detail_item`
+    # template rendered per path produced.
+    #
+    # A configured `detail_item` replaces the derived bullets outright — both keys
+    # get the same list, or the override would be silently dead because `details`
+    # takes precedence over `changes` when the block is rendered.
+    templated_details = _render_list_template(
+        template, "detail_item", reviewable, "path", template_values, limit=20
+    ) if _template_text(template, "detail_item") else []
+    details = templated_details or (
+        describe.detail_bullets(changes, context) if changes
+        else [f"`{path}` changed" for path in reviewable[:20]]
+    )
+    glance = describe.at_a_glance(
+        changes, context, change_type=kind, risk=risk,
+        risk_reason=derived_risk_reason, insights=insights,
+    )
+
     return {
         "title": title,
-        "summary": _render_template(template, "summary", template_values) or subject,
-        "description": _render_template(template, "description", template_values),
+        "summary": _render_template(template, "summary", template_values) or glance,
+        "description": (
+            _render_template(template, "description", template_values) or glance
+        ),
+        "at_glance": glance,
         "change_type": kind,
         "risk": risk,
-        "risk_reason": _risk_reason(template, risk),
+        "risk_reason": _risk_reason(template, risk) or derived_risk_reason,
         "breaking_change": False,
         "breaking_change_details": "",
-        "components": components,
-        "changes": _render_list_template(
-            template, "detail_item", paths, "path", template_values, limit=20
-        ),
+        "components": reviewable_components,
+        # `changes` stays the per-file list for consumers that already read it;
+        # `details` is the same content, and At a Glance no longer reuses it.
+        "changes": details,
+        "details": details,
         "release_notes": [note] if (note := _render_template(template, "release_note",
                                                              template_values)) else [],
         "recommended_testing": _render_list_template(
-            template, "testing_item", components, "component", template_values, limit=8
-        ),
+            template, "testing_item", reviewable_components, "component",
+            template_values, limit=8,
+        ) or describe.test_plan(context),
+        "test_plan": describe.test_plan(context),
         "review_focus": _render_list_template(
-            template, "review_focus_item", paths, "path", template_values, limit=10
+            template, "review_focus_item", reviewable, "path", template_values, limit=10
         ),
         "migration_notes": [],
         "rollback": _render_template(template, "rollback", template_values),
-        "user_impact": _render_template(template, "user_impact", template_values),
+        "user_impact": (
+            _render_template(template, "user_impact", template_values)
+            or describe.user_impact(context, insights=insights)
+        ),
+        "noise": describe.group_noise(paths),
         "related_issues": refs,
     }
 
@@ -262,8 +323,12 @@ def review_diff(context: Mapping[str, Any], diff: str, *, security_only: bool = 
 
 
 def analyse_tests(context: Mapping[str, Any]) -> dict[str, Any]:
-    changed = [str(p) for p in context.get("files") or []]
-    existing = [str(p) for p in context.get("repository_tests") or []]
+    # A committed .pyc under tests/ is not a changed test, and reporting it as one
+    # produced a test plan asking the reviewer to run compiled bytecode.
+    changed = [str(p) for p in context.get("files") or [] if not describe.is_noise(str(p))]
+    existing = [
+        str(p) for p in context.get("repository_tests") or [] if not describe.is_noise(str(p))
+    ]
     changed_tests = [p for p in changed if "test" in PurePosixPath(p).name.lower()
                      or any(part in {"test", "tests", "__tests__", "spec"}
                             for part in PurePosixPath(p).parts)]
@@ -300,12 +365,6 @@ def analyse(plan: Mapping[str, Any], context: Mapping[str, Any], diff: str) -> d
         "action": plan.get("action"), "head_sha": context.get("head_sha"),
         "engine": "deterministic-python-rules-v1",
     }
-    if plan.get("metadata"):
-        options = plan.get("metadata_options") or {}
-        template = options.get("template") if isinstance(options, Mapping) else {}
-        if not isinstance(template, Mapping):
-            template = {}
-        result["metadata"] = {"status": "ok", "data": generate_metadata(context, template)}
     if plan.get("review") or plan.get("security"):
         security_only = bool(plan.get("security")) and not plan.get("review")
         result["review"] = {"status": "ok", "data": review_diff(context, diff,
@@ -314,11 +373,21 @@ def analyse(plan: Mapping[str, Any], context: Mapping[str, Any], diff: str) -> d
     if plan.get("tests"):
         result["tests"] = {"status": "ok", "data": analyse_tests(context)}
     # Diff-based insights: size, secrets, dependencies, migrations, API, notes.
-    result.update(insights.run_all(plan, context, diff, plan.get("policies") or {}))
+    result.update(insights_run.run_all(plan, context, diff, plan.get("policies") or {}))
+
+    # Metadata runs LAST, so the description is written from the diff and from what
+    # the insights already established rather than from the path list alone.
     if plan.get("metadata"):
-        # The insights know more about risk and breakage than the path heuristics
-        # do, so the PR description is written from them where they ran.
-        enrich_metadata(result)
+        options = plan.get("metadata_options") or {}
+        template = options.get("template") if isinstance(options, Mapping) else {}
+        if not isinstance(template, Mapping):
+            template = {}
+        result["metadata"] = {
+            "status": "ok",
+            "data": generate_metadata(context, template, diff=diff, insights=result),
+        }
+        # Test plan and migration notes need the test-gap and migration results.
+        enrich_metadata(result, context)
     if plan.get("fix"):
         findings = ((result.get("review") or {}).get("data") or {}).get("findings") or []
         fixable = [f for f in findings if f.get("rule") in {
@@ -343,7 +412,9 @@ def _section_data(result: Mapping[str, Any], key: str) -> dict[str, Any]:
     return dict(data) if isinstance(data, Mapping) else {}
 
 
-def enrich_metadata(result: dict[str, Any]) -> None:
+def enrich_metadata(
+    result: dict[str, Any], context: Mapping[str, Any] | None = None
+) -> None:
     """Fold insight findings into the generated PR metadata, in place.
 
     The path-based heuristics in :func:`generate_metadata` are a fallback. Where
@@ -360,15 +431,10 @@ def enrich_metadata(result: dict[str, Any]) -> None:
 
     size_data = _section_data(result, "size")
     if size_data.get("risk"):
+        # The measured level replaces the path heuristic. The reason itself is
+        # already derived in scripts/insights/describe.py, which names the files
+        # that decided it, so it is not rewritten here.
         metadata["risk"] = size_data["risk"]
-        metrics = size_data.get("metrics") or {}
-        areas = ", ".join(sorted(size_data.get("sensitive_areas") or {}))
-        metadata["risk_reason"] = (
-            f"{metrics.get('files_reviewable', 0)} reviewable file(s), "
-            f"{metrics.get('lines_reviewable', 0)} changed line(s)"
-            + (f"; touches {areas}" if areas else "")
-            + "."
-        )
 
     api_data = _section_data(result, "api")
     if api_data.get("breaking_change"):
@@ -411,6 +477,17 @@ def enrich_metadata(result: dict[str, Any]) -> None:
             for hit in secrets_data["hits"][:5]
         ]
         metadata["review_focus"] = focus + list(metadata.get("review_focus") or [])[:8]
+
+    # The test plan is derived from the test-gap analysis and the coverage result
+    # where those ran, so it names real tests instead of a component name.
+    tests_data = _section_data(result, "tests")
+    if tests_data and context is not None:
+        plan_steps = describe.test_plan(
+            context, tests=tests_data, coverage=_section_data(result, "coverage"),
+        )
+        if plan_steps:
+            metadata["test_plan"] = plan_steps
+            metadata["recommended_testing"] = plan_steps
 
 
 #: Section key -> label, in the order the job summary lists them.

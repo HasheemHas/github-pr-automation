@@ -165,7 +165,10 @@ def test_the_measured_risk_replaces_the_path_heuristic():
     result = analyse(_plan(), CONTEXT, DIFF)
     metadata = result["metadata"]["data"]
     assert metadata["risk"] == result["size"]["data"]["risk"]
-    assert "changed line(s)" in metadata["risk_reason"]
+    # The reason names the files that decided the level, not just a count.
+    assert "changed lines" in metadata["risk_reason"]
+    assert "reviewable file" in metadata["risk_reason"]
+    assert "`.env`" in metadata["risk_reason"]
 
 
 def test_a_breaking_api_change_sets_the_breaking_change_flag():

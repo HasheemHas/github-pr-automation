@@ -68,7 +68,19 @@ def _heading_for(name: str, headings: Mapping[str, str] | None = None) -> str:
 
 
 def _bullets(values: Sequence[str]) -> str:
-    return "\n".join(f"- {value}" for value in values if str(value).strip())
+    """Render a bullet list, preserving pre-formatted nesting.
+
+    A value that already starts with indentation is emitted verbatim: it is a
+    nested list item the caller has laid out. Prefixing it again produced
+    ``-   - item``, which markdown renders as a literal dash.
+    """
+    lines: list[str] = []
+    for value in values:
+        text = str(value)
+        if not text.strip():
+            continue
+        lines.append(text if text.startswith((" ", "\t")) else f"- {text}")
+    return "\n".join(lines)
 
 
 def _heading(title: str) -> str:
@@ -171,14 +183,28 @@ def _numbered(values: Sequence[str]) -> str:
 
 
 def _at_glance(meta: Mapping[str, Any], context: Mapping[str, Any], heading: str) -> str:
-    rows = []
+    """Summarise the change as a whole.
+
+    Prefers the derived prose summary. Repeating the per-file list here — which is
+    what this section used to do — made At a Glance and Details identical and told
+    a reader nothing they could not get from the Files tab.
+    """
+    derived = (meta.get("at_glance") or "").strip()
+    if derived:
+        return _section(heading, derived)
+
+    # Fallback for a payload with no derived summary: risk plus the highest-value
+    # focus items, never the whole change list.
+    parts: list[str] = []
     level = (meta.get("risk") or "").strip()
     if level:
-        rows.append(f"**Risk:** {level.title()}")
-    changes = list(meta.get("changes") or [])
-    if meta.get("review_focus"):
-        changes.extend(list(meta.get("review_focus") or [])[:1])
-    body = "\n\n".join(part for part in (rows[0] if rows else "", _bullets(changes[:5])) if part)
+        reason = (meta.get("risk_reason") or "").strip()
+        parts.append(f"**Risk:** {level.title()}" + (f" — {reason}" if reason else ""))
+    summary = (meta.get("summary") or "").strip()
+    if summary:
+        parts.append(summary)
+    focus = list(meta.get("review_focus") or [])[:3]
+    body = "\n\n".join([part for part in parts if part] + ([_bullets(focus)] if focus else []))
     return _section(heading, body)
 
 

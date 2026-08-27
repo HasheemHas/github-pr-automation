@@ -425,6 +425,47 @@ check that failed for a missing approval would deadlock against it. Readiness
 appears in the check title, the summary and the PR comment, where it informs
 without gating twice.
 
+## How the description is written
+
+Every line of the managed description block is **derived from the diff** by
+[`scripts/insights/describe.py`](scripts/insights/describe.py). It is not a
+template with a path substituted into it, because that produces text that says
+nothing:
+
+```text
+At a Glance                        Details
+Update .github/workflows/ci.yml.   Update .github/workflows/ci.yml.
+Update scripts/__pycache__/x.pyc.  Update scripts/__pycache__/x.pyc.
+```
+
+What is derived, and from what:
+
+| Section | Derived from |
+| --- | --- |
+| At a Glance | change type, reviewable scale, the notable signals from the other checks, and the risk level *with its reason* |
+| Details | per file: the functions, classes and types it added and removed; a workflow's jobs, triggers and actions; a manifest's package moves; a migration's schema operations; a config file's keys; a doc's headings — plus GitHub's own ±line counts |
+| Test Plan | the tests that actually cover each changed file, the files nothing covers, migrations to apply, the changed-line coverage figure, and configured commands |
+| User Impact | stated only where a real signal supports it — a removed route, a migration, a UI or config change; where there is none it says what was checked rather than a disclaimer |
+| Release Notes | Conventional or freeform commit subjects, grouped, with deployment notes folded in |
+
+Three rules this enforces:
+
+- **Build artefacts are never listed as changes.** `.pyc` files, lock files,
+  vendored trees, `dist/`, snapshots and generated code collapse into one line
+  saying what they are — and, for committed bytecode, that it should be
+  `.gitignore`d. They are also excluded from the reviewable file count, the risk
+  level, the concern spread and the test plan, so two real files never read as
+  six.
+- **At a Glance and Details can never be the same content.** One summarises the
+  change; the other describes each file. A test asserts they differ.
+- **No section is padded.** An empty section is omitted, and a claim is made only
+  where the diff supports it.
+
+`metadata.template` in `config/repositories.yml` is an **optional override**,
+shipped empty. Setting a key replaces the derived content for that key with a
+fixed string — useful when a wording is fixed by policy, and almost never
+otherwise. `metadata.headings` renames the sections without touching content.
+
 ## What lands on the PR
 
 - **Body** — a managed description block between two HTML markers. Author text
@@ -529,6 +570,7 @@ scripts/
                           and safe three-way conflict resolution
   insights/               diff-only insights, all credential-free
     changes.py              per-file added/removed line parsing
+    describe.py             derives the PR description from the diff
     base.py                 the shared status/finding envelope
     size.py                 PR size and risk policy
     secrets.py              credential detection (values always masked)

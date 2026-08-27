@@ -28,17 +28,21 @@ defaults:
     trivy: false
   metadata:
     title_policy: weak
-    # PR description template. The Python code only fills these placeholders:
-    # {subject}, {components}, {component}, {change_type}, {risk}, {risk_lower},
-    # {files}, {additions}, {deletions}, {commits}, {path}.
+
+    # Which sections the managed description block contains, and in what order.
+    # An empty section is omitted automatically, so listing one costs nothing.
+    #   at_glance  details  behaviour  test_plan  type  user_impact
+    #   description  change_type  risk  components  changes  release_notes
+    #   breaking  migration  testing  review_focus  rollback  related_issues  stats
     sections:
       - at_glance
       - details
-      - behaviour
       - test_plan
       - type
       - user_impact
       - release_notes
+
+    # Section headings, so the block matches your house style.
     headings:
       at_glance: At a Glance
       details: Details
@@ -47,19 +51,42 @@ defaults:
       type: Type
       user_impact: User Impact
       release_notes: Release Notes
-    template:
-      summary: "{subject}"
-      description: "{subject}"
-      detail_item: "Update `{path}`."
-      release_note: "{subject}."
-      testing_item: "Run the configured checks for `{component}`."
-      review_focus_item: "Review `{path}`."
-      rollback: "Revert the pull request commit and redeploy the previous revision."
-      user_impact: "No consumer impact is known from the changed files. Review the PR diff for behaviour-specific impact."
-      risk_reasons:
-        high: "Sensitive, deployment, infrastructure, workflow, Docker, or migration files are affected."
-        medium: "The change is broad enough to require focused regression testing."
-        low: "The change is limited in file count and diff size."
+
+    # ---------------------------------------------------------------------
+    # `template:` is an OPTIONAL OVERRIDE, and it is deliberately empty.
+    #
+    # By default every line of the description is DERIVED from the diff by
+    # scripts/insights/describe.py:
+    #   at_glance    change type, reviewable scale, notable signals, risk + why
+    #   details      per file: the functions, classes, workflow jobs, config keys
+    #                or headings it added and removed — build artefacts and lock
+    #                files are collapsed into one line, never listed
+    #   test_plan    the tests that actually cover the changed files, the files
+    #                nothing covers, and the coverage figure
+    #   user_impact  stated only where a real signal supports it (API, schema,
+    #                migration, UI, config); otherwise says what was checked
+    #
+    # Setting a key below REPLACES the derived content for that key with a fixed
+    # string. That is almost never what you want: a template rendered once per
+    # path produces "Update `<path>`." repeated down the page, which is what this
+    # config used to do. Set one only when a wording must be fixed by policy.
+    #
+    # Placeholders available: {subject} {components} {component} {change_type}
+    # {risk} {risk_lower} {files} {additions} {deletions} {commits} {path}
+    #
+    # template:
+    #   summary: "{subject}"
+    #   detail_item: "Update `{path}`."          # overrides derived Details
+    #   testing_item: "Run checks for {component}."   # overrides derived Test Plan
+    #   user_impact: "..."                        # overrides derived User Impact
+    #   review_focus_item: "Review `{path}`."
+    #   release_note: "{subject}."
+    #   rollback: "Revert the pull request commit and redeploy the previous revision."
+    #   risk_reasons:
+    #     high: "..."
+    #     medium: "..."
+    #     low: "..."
+    template: {}
   review:
     inline_comments: true
   sandbox:

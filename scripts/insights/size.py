@@ -23,6 +23,13 @@ from .changes import file_stats
 
 #: Files whose size says nothing about review effort.
 DEFAULT_GENERATED = (
+    # Compiled bytecode and caches. A committed .pyc must never count towards the
+    # reviewable file count, or a PR of two real files reads as six.
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/*.class",
+    "**/*.o",
     "**/package-lock.json",
     "**/yarn.lock",
     "**/pnpm-lock.yaml",
@@ -255,7 +262,16 @@ def evaluate(context: Mapping[str, Any], config: Mapping[str, Any] | None = None
             "Consider squashing so the history reads as deliberate steps.",
         ))
 
-    paths = [str(p) for p in context.get("files") or []]
+    # Concerns and sensitive areas are judged on files a human reviews. A committed
+    # .pyc landing in "other" made every such change read as spanning an extra area.
+    all_paths = [str(p) for p in context.get("files") or []]
+    # Recomputed from the patterns rather than read from metrics, whose path lists
+    # are capped for artifact size.
+    paths = [
+        p for p in all_paths
+        if not _generated(p, generated_patterns)
+        and not (ignore_patterns and _generated(p, ignore_patterns))
+    ] or all_paths
     concerns = classify_concerns(paths)
     substantive = sorted(set(concerns) - INCIDENTAL_CONCERNS)
     if max_concerns and len(substantive) > max_concerns:
