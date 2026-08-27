@@ -1,6 +1,6 @@
 # Central PR Automation
 
-Single implementation of PR metadata, labels, reviewers, AI review, security
+Single implementation of PR metadata, labels, reviewers, deterministic review, security
 scanning, quality validation, test-gap analysis, safe fixes and merge-conflict
 resolution for every allowlisted target repository.
 
@@ -84,44 +84,17 @@ and two Android Gradle builds — correct, but not what you want on every PR.
 | --- | --- |
 | `GH_APP_ID` | GitHub App ID |
 | `GH_APP_PRIVATE_KEY` | GitHub App private key, PEM contents |
-| `NVIDIA_API_KEY` | OpenAI-compatible NVIDIA API key |
+| `GH_APP_CLIENT_ID` | Optional modern GitHub App client ID; preferred over `GH_APP_ID` |
 
 **Actions variables:**
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `TARGET_ORG` | yes | Owner of the target repositories, e.g. `mycompany` |
-| `AI_BASE_URL` | no | Overrides `https://integrate.api.nvidia.com/v1` |
-| `AI_METADATA_MODEL` | no | Overrides `nvidia/nemotron-3.5-lightning-30b-a3b` |
-| `AI_REVIEW_MODEL` | no | Overrides `nvidia/nemotron-3.5-lightning-30b-a3b` (review, test-gap analysis and patches) |
-| `AI_MAX_TOKENS` | no | Output-token budget per request, default `8192`. Raise it if a reasoning model runs out of room before emitting its JSON |
-| `AI_LOG_PROMPTS` | no | `true` to include prompt text in `ai-log.jsonl`. Off by default — sizes are logged either way |
 
-### AI request logs
-
-Every model call is logged three ways, so a failure is diagnosable without
-guesswork:
-
-**In the Actions log**, one line per request, grouped per section:
-
-```text
-metadata | attempt 1/3 | model=nvidia/… | mode=json_object | prompt=12000c |
-  response=70c | 1400ms | outcome=parse_error | error=… It began: 'Sure! Let me…'
-metadata | attempt 2/3 | model=nvidia/… | mode=plain | prompt=12000c |
-  response=83c | 1400ms | outcome=ok
-```
-
-**In the job summary**, a table of every request plus totals (requests,
-succeeded/failed, retries, latency, output tokens).
-
-**As `ai-log.jsonl`** in the `pr-automation-analysis` artifact (kept 7 days), one
-JSON object per request with section, model, attempt, mode, outcome, latency,
-prompt/response sizes, `finish_reason`, token usage and `max_tokens`.
-
-Outcomes are `ok`, `provider_error`, `truncated`, `parse_error`, `schema_error`,
-`empty` — enough to tell "the provider refused" from "it ran out of tokens" from
-"it returned prose". A failing response is quoted (500 chars); a successful one
-is not, because it is already in `analysis.json`. The API key never appears.
+No AI provider, model configuration, or AI API key is required. Metadata,
+diff review, test-gap detection, safe fixes, and conflict decisions are produced
+by versioned Python rules in `scripts/automation/`.
 
 `TARGET_ORG` is not `GITHUB_ORG`: GitHub reserves the `GITHUB_` prefix and will
 not let you create a variable with that name.
@@ -139,13 +112,10 @@ not let you create a variable with that name.
 Install the App on each target repository, then add it to
 `config/repositories.yml` with `enabled: true`.
 
-Run **Verify AI model availability** once after setup to confirm the configured
-model IDs exist on your endpoint.
-
 ## Security model
 
 Target-controlled code executes in exactly one job, `validate-target`, and that
-job holds no GitHub App token, no private key, no NVIDIA key and no write
+job holds no GitHub App token, no private key and no write
 permission. It receives the target working tree as an artifact prepared by a
 separate job.
 
@@ -153,9 +123,9 @@ separate job.
 | --- | --- | --- |
 | `plan` | none | no |
 | `resolve-target` | App read token | no |
-| `ai-analysis` | NVIDIA key | no |
+| `deterministic-analysis` | none | no |
 | `prepare-validation-source` | App read token | no |
-| `ai-resolve-conflicts` | NVIDIA key | no |
+| `deterministic-resolve` | none | no |
 | `validate-target` | **none** | **yes** |
 | `report-to-target` | App write token | no |
 | `privileged-fix-write` | App write token | no |
@@ -189,18 +159,17 @@ Every artifact is an explicit file list. `$RUNNER_TEMP` is never uploaded whole.
 No private key belongs in this repository; `.gitignore` blocks `*.pem`, `*.key`,
 `*.private-key.*` and `.env*`, and CI fails if key material is ever committed.
 
-## Fail-safe AI behaviour
+## Deterministic behavior and safety limits
 
 | Failure | Result |
 | --- | --- |
-| Metadata call fails | PR title and body left unchanged |
-| Review call fails | no findings posted, nothing fabricated |
-| Some review batches fail | surviving findings kept, verdict drops to `PARTIAL` |
-| Malformed JSON or schema violation | treated as a failure, never written |
-| Fix generation fails or is unconfident | no patch, no commit, no push |
-| Conflict resolution unconfident or out of allowlist | no resolution |
+| Metadata input is incomplete | Generate only facts available from GitHub metadata |
+| Diff is truncated | Mark review coverage `PARTIAL` and name uncovered files |
+| Static analyzer cannot run | Report `ERROR`/`PARTIAL`, never `PASS` |
+| No supported safe fix exists | No patch, commit, or push |
+| Both sides changed a conflicted file | Refuse automatic resolution for human review |
+| Head or base moves after validation | Refuse the push and require a re-run |
 
-An AI failure shows in the report as `ERROR` or `NOT RUN`, never as `PASS`.
 `PARTIAL` propagates: an enabled scanner that could not run, or a review that did
 not cover every file, never collapses into an overall `PASS`.
 
@@ -208,7 +177,7 @@ not cover every file, never collapses into an overall `PASS`.
 
 - **Body** — a managed description block between two HTML markers. Author text
   outside it is preserved verbatim; regenerating replaces only the block. It opens
-  with the description itself, not an "AI summary" banner. Sections:
+  with the description itself, not a generated-summary banner. Sections:
 
   | Section | Content |
   | --- | --- |
@@ -224,7 +193,7 @@ not cover every file, never collapses into an overall `PASS`.
   | Review Focus | the files or behaviours needing closest attention |
   | Rollback | how to revert safely |
   | Related Issues | references found in the PR text (never invented) |
-  | Change Stats | files, ±lines, commits — from the PR, not the model |
+  | Change Stats | files, ±lines and commits from the PR |
 
   An empty section is omitted, never padded with `None`/`N/A`, so a one-line PR
   gets a short block. Choose and order sections per repository with
@@ -236,7 +205,7 @@ not cover every file, never collapses into an overall `PASS`.
   always states which way it went and why.
 - **Inline review comments** — critical/high/medium findings are posted as a
   review on the exact changed line. The line is verified against the right-side
-  diff map, not trusted from the model; a finding that cannot be anchored stays
+  diff map; a finding that cannot be anchored stays
   in the summary rather than landing on a wrong line. Re-runs de-duplicate on a
   finding fingerprint, capped at 25 comments per review.
 - **Labels**, **reviewer requests**, one **report comment**, and the
@@ -251,20 +220,31 @@ story without opening the logs or the PR:
 | --- | --- |
 | `plan` | target, action, which steps were requested, sandbox and title policy |
 | `resolve-target` | PR title, author, head/base, fork flag, file and line counts, test-file count, changed-file list |
-| `ai-analysis` | per-section status, both model IDs, the proposed title and summary, the findings table, batch coverage and any unreviewed files |
+| `deterministic-analysis` | generated metadata, reproducible rule findings, test gaps and coverage |
 | `validate-target` | a PASS/FAIL/SKIPPED row per command, host-vs-container execution, and the output tail of each failing command |
 | `report-to-target` | the full gate table, severity counts, exactly what was written to the PR, findings, unanchorable findings, test gaps and notes |
 
 Missing `GITHUB_STEP_SUMMARY` is a no-op, so the scripts stay runnable locally,
 and a summary write failure can never fail a job.
 
-## Large pull requests
+## Review and fix rules
 
-The review splits the diff by file, splits oversized files by hunk, packs the
-pieces into batches, and merges the findings. Tune with `AI_REVIEW_BATCH_CHARS`,
-`AI_REVIEW_BATCH_FILES` and `AI_REVIEW_MAX_BATCHES`. If the batch cap is hit, the
-uncovered files are named in the report and the verdict is `PARTIAL` — a review
-never claims coverage it does not have.
+The built-in diff review detects credential-shaped literals, private keys,
+dynamic code execution, shell execution, disabled TLS verification, bare Python
+exceptions, debug output, work markers and trailing whitespace. Ecosystem tools
+such as Ruff, ESLint, Bandit, Semgrep and Gitleaks should be enabled through the
+repository command configuration for deeper language-aware coverage.
+
+Automatic fixes are intentionally narrower than review: the built-in fixer
+removes trailing whitespace and replaces bare Python `except:` handlers with
+`except Exception:` only on lines added by the PR. Add centrally reviewed
+formatter or codemod rules when a repository needs more transformations.
+
+Conflict resolution performs a verified three-way merge. It resolves identical
+or one-sided changes and semantically merges JSON objects when the two branches
+changed different keys. Same-key JSON conflicts and text files changed by both
+sides are left for human review; automation never chooses `ours` or `theirs`
+arbitrarily.
 
 Test-gap analysis reads the whole repository tree at the PR head (one Git Trees
 call, no checkout), so existing tests are found even when the PR does not touch
@@ -277,8 +257,8 @@ scripts/
   plan.py                 action dispatch + allowlist + plan artifact
   common/                 config, globs, labels, reviewers, titles, sandbox,
                           command runner
-  ai/                     client (JSON fallback), schemas, prompts, chunking,
-                          analyze, resolve, check_models
+  automation/             deterministic metadata, review, test gaps, fixes,
+                          and safe three-way conflict resolution
   github/                 paginated REST client, get_pr, diffmap, report
   gitops/                 merge probe, patch inspection, validate, push
   quality/  security/     validation runners (sandboxed, credential-free)
@@ -290,7 +270,6 @@ config/
   central-pr-automation.yml   the pipeline
   ci.yml                      self-tests
   release-central.yml         read-only version proposal
-  verify-ai-models.yml        model availability diagnostic
 ```
 
 There are deliberately no per-repository dispatcher workflows here:

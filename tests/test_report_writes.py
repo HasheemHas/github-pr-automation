@@ -201,7 +201,7 @@ def test_no_summary_means_no_write_at_all():
     assert outcome == {
         "body_updated": False,
         "title_updated": False,
-        "title_reason": "No AI summary, so nothing was written.",
+        "title_reason": "No generated summary, so nothing was written.",
     }
     assert opener.calls == []
 

@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
             "repo": target.repo,
             "full_name": target.full_name,
             "plan": json.dumps(execution, separators=(",", ":")),
-            "needs_ai": str(execution["needs_ai"]).lower(),
+            "needs_analysis": str(execution["needs_analysis"]).lower(),
             "needs_target_source": str(execution["needs_target_source"]).lower(),
             "needs_privileged_write": str(execution["needs_privileged_write"]).lower(),
             "needs_merge_probe": str(execution["needs_merge_probe"]).lower(),
@@ -191,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         summary.definitions(
             {
-                "AI required": "yes" if execution["needs_ai"] else "no",
+                "Deterministic analysis required": "yes" if execution["needs_analysis"] else "no",
                 "Target checkout required": "yes" if execution["needs_target_source"] else "no",
                 "Writes to git": "yes" if execution["needs_privileged_write"] else "no",
                 "Sandbox": (

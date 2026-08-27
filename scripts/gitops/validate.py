@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import sys
+import subprocess
 from pathlib import Path
 
 from ..common.commands import run_commands, summarise
@@ -63,10 +64,27 @@ def main(argv: list[str] | None = None) -> int:
     if not ok:
         return fail(f"Patch failed to apply: {output.strip()[:500]}")
 
-    try:
-        touched = verify_changed_paths(cwd, allowed, forbidden)
-    except AutomationError as exc:
-        return fail(str(exc))
+    if patch_name == "resolution.patch":
+        # The checkout deliberately contains a pending merge. Base-branch changes
+        # outside the conflict allowlist are part of that merge, not model/script
+        # edits, so validate only the declared resolution paths and ensure every
+        # unmerged index entry is cleared.
+        staged = subprocess.run(["git", "add", "--", *declared], cwd=cwd,
+                                capture_output=True, text=True)
+        if staged.returncode != 0:
+            return fail(f"Could not stage resolved paths: {staged.stderr.strip()[:500]}")
+        unresolved = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"], cwd=cwd,
+            capture_output=True, text=True,
+        )
+        if unresolved.returncode != 0 or unresolved.stdout.strip():
+            return fail("The deterministic resolution did not resolve every conflict.")
+        touched = declared
+    else:
+        try:
+            touched = verify_changed_paths(cwd, allowed, forbidden)
+        except AutomationError as exc:
+            return fail(str(exc))
 
     # A patch is only pushed if it passed validation, so the validation must be
     # tamper-resistant: target commands run in a container that cannot see the

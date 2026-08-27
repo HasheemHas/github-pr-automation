@@ -307,6 +307,7 @@ def main(argv: list[str] | None = None) -> int:
             handle.write(f"head_sha={context['head_sha']}\n")
             handle.write(f"head_ref={context['head_ref']}\n")
             handle.write(f"base_ref={context['base_ref']}\n")
+            handle.write(f"base_sha={context['base_sha']}\n")
             handle.write(f"from_fork={'true' if context['from_fork'] else 'false'}\n")
             handle.write(f"file_count={len(context['files'])}\n")
     print(f"Resolved {full_repo}#{number} at {context['head_sha']} "

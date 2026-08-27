@@ -74,12 +74,12 @@ def test_action_names_are_trimmed():
 
 
 @pytest.mark.parametrize(
-    "action,needs_ai",
+    "action,needs_analysis",
     [("all", True), ("metadata", True), ("review", True), ("tests", True),
      ("labels", False), ("reviewers", False), ("quality", False)],
 )
-def test_ai_is_only_requested_when_a_step_needs_it(action, needs_ai):
-    assert plan(action)["needs_ai"] is needs_ai
+def test_analysis_is_only_requested_when_a_step_needs_it(action, needs_analysis):
+    assert plan(action)["needs_analysis"] is needs_analysis
 
 
 @pytest.mark.parametrize(

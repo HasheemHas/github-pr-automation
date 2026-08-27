@@ -4,7 +4,7 @@ The block sits between two HTML markers so regenerating it never touches text th
 author wrote outside it.
 
 Design rules:
-  * no "AI PR Summary" banner heading — the block *is* the description, and it
+  * no generated-summary banner heading — the block *is* the description, and it
     opens with the description itself
   * a section with no content is omitted, not padded with "None" or "N/A"; the
     exception is Breaking Changes, where "None" is real information
@@ -126,7 +126,7 @@ def _related_issues(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
 
 
 def _stats(meta: Mapping[str, Any], context: Mapping[str, Any]) -> str:
-    """Deterministic facts from the PR itself — never AI-generated."""
+    """Deterministic facts from the PR itself."""
     if not context:
         return ""
     files = context.get("files") or []

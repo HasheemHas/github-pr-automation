@@ -36,8 +36,8 @@ ACTIONS: dict[str, tuple[str, ...]] = {
     "resolve-conflicts": ("resolve_conflicts",),
 }
 
-#: Steps that call the AI provider.
-AI_STEPS = frozenset({"metadata", "review", "security", "tests", "fix", "resolve_conflicts"})
+#: Steps that need deterministic diff/context analysis.
+ANALYSIS_STEPS = frozenset({"metadata", "review", "security", "tests", "fix", "resolve_conflicts"})
 
 #: Steps that need the target repository working tree checked out.
 SOURCE_STEPS = frozenset({"quality", "security", "fix", "resolve_conflicts"})
@@ -64,7 +64,7 @@ def plan(action: str) -> dict[str, object]:
         "steps": list(steps),
         **enabled,
         # ``security`` shares the AI review call, so review analysis is needed too.
-        "needs_ai": any(step in AI_STEPS for step in steps),
+        "needs_analysis": any(step in ANALYSIS_STEPS for step in steps),
         "needs_target_source": any(step in SOURCE_STEPS for step in steps),
         "needs_privileged_write": any(step in WRITE_STEPS for step in steps),
         # Conflict resolution needs full history and a merge attempt.

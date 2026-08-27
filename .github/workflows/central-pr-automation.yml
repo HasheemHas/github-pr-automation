@@ -4,9 +4,9 @@ name: Central PR Automation
 #
 #   plan                        no credentials at all
 #   resolve-target              App read token, no target code executed
-#   ai-analysis                 NVIDIA key only, no target code executed
+#   deterministic-analysis     no credentials, no target code executed
 #   prepare-validation-source   App read token, checkout only, no target code
-#   ai-resolve-conflicts        NVIDIA key only, no target code executed
+#   deterministic-resolve      no credentials, no target code executed
 #   validate-target             NO credentials; this is where target code runs
 #   report-to-target            App write token, no target code executed
 #   privileged-fix-write        App write token, no target code executed
@@ -28,7 +28,6 @@ on:
       # alias. Either value works as the JWT issuer.
       GH_APP_CLIENT_ID: { required: false }
       GH_APP_PRIVATE_KEY: { required: true }
-      NVIDIA_API_KEY: { required: false }
   workflow_dispatch:
     inputs:
       repository:
@@ -52,7 +51,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: central-pr-${{ inputs.repository }}-${{ inputs.pr_number }}-${{ inputs.action }}
+  group: central-pr-${{ inputs.repository }}-${{ inputs.pr_number }}
   cancel-in-progress: false
 
 env:
@@ -72,7 +71,7 @@ jobs:
       repo: ${{ steps.plan.outputs.repo }}
       full_name: ${{ steps.plan.outputs.full_name }}
       plan: ${{ steps.plan.outputs.plan }}
-      needs_ai: ${{ steps.plan.outputs.needs_ai }}
+      needs_analysis: ${{ steps.plan.outputs.needs_analysis }}
       needs_target_source: ${{ steps.plan.outputs.needs_target_source }}
       needs_privileged_write: ${{ steps.plan.outputs.needs_privileged_write }}
       needs_merge_probe: ${{ steps.plan.outputs.needs_merge_probe }}
@@ -113,6 +112,7 @@ jobs:
       head_sha: ${{ steps.pr.outputs.head_sha }}
       head_ref: ${{ steps.pr.outputs.head_ref }}
       base_ref: ${{ steps.pr.outputs.base_ref }}
+      base_sha: ${{ steps.pr.outputs.base_sha }}
       from_fork: ${{ steps.pr.outputs.from_fork }}
       file_count: ${{ steps.pr.outputs.file_count }}
       has_codeowners: ${{ steps.files.outputs.codeowners }}
@@ -178,13 +178,13 @@ jobs:
           retention-days: 1
           path: ${{ runner.temp }}/pr-automation-artifacts/codeowners.txt
 
-  # ----------------------------------------------------------- ai-analysis -----
-  # Holds NVIDIA_API_KEY. Reads the sanitised context artifact. Never checks out
-  # or executes target repository code.
-  ai-analysis:
-    name: ai-analysis
+  # ----------------------------------------------- deterministic-analysis -----
+  # Reads the sanitised context artifact, makes no network calls, and never
+  # checks out or executes target repository code.
+  deterministic-analysis:
+    name: deterministic-analysis
     needs: [plan, resolve-target]
-    if: needs.plan.outputs.needs_ai == 'true' && needs.plan.outputs.run_resolve_conflicts != 'true'
+    if: needs.plan.outputs.needs_analysis == 'true' && needs.plan.outputs.run_resolve_conflicts != 'true'
     runs-on: ubuntu-latest
     # contents: read is the minimum that lets this job check out THIS repository.
     # It grants nothing on the target repository and cannot write anywhere.
@@ -204,42 +204,18 @@ jobs:
         with:
           name: pr-automation-context
           path: ${{ runner.temp }}/pr-automation-artifacts
-      - name: Run AI analysis
+      - name: Run deterministic analysis
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          AI_BASE_URL: ${{ vars.AI_BASE_URL }}
-          AI_METADATA_MODEL: ${{ vars.AI_METADATA_MODEL }}
-          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
-          AI_MAX_TOKENS: ${{ vars.AI_MAX_TOKENS }}
-          AI_LOG_PROMPTS: ${{ vars.AI_LOG_PROMPTS }}
           PR_AUTOMATION_PLAN: ${{ needs.plan.outputs.plan }}
-        run: python -m scripts.ai.analyze
-      - name: Detect a candidate patch
-        id: files
-        if: always()
-        run: |
-          if [ -s "$RUNNER_TEMP/pr-automation-artifacts/fix.patch" ]; then
-            echo 'patch=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'patch=false' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Upload AI analysis
+        run: python -m scripts.automation.analyze
+      - name: Upload deterministic analysis
         uses: actions/upload-artifact@v6
         if: always()
         with:
           name: pr-automation-analysis
           retention-days: 7
           if-no-files-found: warn
-          path: |
-            ${{ runner.temp }}/pr-automation-artifacts/analysis.json
-            ${{ runner.temp }}/pr-automation-artifacts/ai-log.jsonl
-      - name: Upload candidate patch
-        uses: actions/upload-artifact@v6
-        if: always() && steps.files.outputs.patch == 'true'
-        with:
-          name: pr-automation-candidate-patch
-          retention-days: 1
-          path: ${{ runner.temp }}/pr-automation-artifacts/fix.patch
+          path: ${{ runner.temp }}/pr-automation-artifacts/analysis.json
 
   # --------------------------------------------- prepare-validation-source -----
   # Holds a read-only App token for the checkout, then hands the working tree on
@@ -288,6 +264,7 @@ jobs:
         env:
           TARGET_WORKDIR: target
           TARGET_BASE_REF: ${{ needs.resolve-target.outputs.base_ref }}
+          TARGET_BASE_SHA: ${{ needs.resolve-target.outputs.base_sha }}
         run: python -m scripts.gitops.probe
       - name: Assert the handed-off tree carries no credentials
         run: |
@@ -317,11 +294,11 @@ jobs:
           if-no-files-found: warn
           path: ${{ runner.temp }}/pr-automation-artifacts/conflicts.json
 
-  # ---------------------------------------------------- ai-resolve-conflicts ---
-  # Holds NVIDIA_API_KEY. Sees only the conflicted hunks, never a credential and
-  # never a shell running target code.
-  ai-resolve-conflicts:
-    name: ai-resolve-conflicts
+  # ----------------------------------------- deterministic-resolve-conflicts ---
+  # Resolves only mechanically unambiguous three-way cases and never executes
+  # target code.
+  deterministic-resolve:
+    name: deterministic-resolve
     needs: [plan, resolve-target, prepare-validation-source]
     if: needs.plan.outputs.run_resolve_conflicts == 'true'
     runs-on: ubuntu-latest
@@ -347,15 +324,10 @@ jobs:
         with:
           name: pr-automation-conflicts
           path: ${{ runner.temp }}/pr-automation-artifacts
-      - name: Resolve conflicts
+      - name: Resolve mechanically unambiguous conflicts
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          AI_BASE_URL: ${{ vars.AI_BASE_URL }}
-          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
-          AI_MAX_TOKENS: ${{ vars.AI_MAX_TOKENS }}
-          AI_LOG_PROMPTS: ${{ vars.AI_LOG_PROMPTS }}
           RESOLVE_ALLOWED_PATHS: ${{ toJSON(fromJSON(needs.plan.outputs.plan).resolve_allowed_paths) }}
-        run: python -m scripts.ai.resolve
+        run: python -m scripts.automation.resolve
       - name: Upload resolution
         uses: actions/upload-artifact@v6
         if: always()
@@ -366,18 +338,17 @@ jobs:
           path: |
             ${{ runner.temp }}/pr-automation-artifacts/resolution.json
             ${{ runner.temp }}/pr-automation-artifacts/resolution.patch
-            ${{ runner.temp }}/pr-automation-artifacts/ai-log.jsonl
 
   # ------------------------------------------------------- validate-target -----
   # THE ONLY JOB THAT EXECUTES TARGET-CONTROLLED CODE.
-  # No App token, no private key, no NVIDIA key, no registry or cloud credential,
+  # No App token, no private key, no registry or cloud credential,
   # no write permission. It receives the target tree as an artifact.
   validate-target:
     name: validate-target
-    # ai-analysis and ai-resolve-conflicts are listed so a candidate patch cannot
+    # Analysis and conflict resolution are listed so a candidate patch cannot
     # be validated before it has been produced. Either may legitimately be
     # skipped, which is why the guard is on prepare-validation-source only.
-    needs: [plan, resolve-target, prepare-validation-source, ai-analysis, ai-resolve-conflicts]
+    needs: [plan, resolve-target, prepare-validation-source, deterministic-analysis, deterministic-resolve]
     if: >-
       always() &&
       needs.prepare-validation-source.result == 'success' &&
@@ -422,13 +393,12 @@ jobs:
           # below only ever `docker run` this already-present image.
           docker pull --quiet "$SANDBOX_IMAGE"
           docker image inspect "$SANDBOX_IMAGE" --format 'sandbox image: {{.Id}}'
-      - name: Download the candidate patch
-        uses: actions/download-artifact@v7
+      - name: Generate deterministic fix patch from the verified checkout
         if: needs.plan.outputs.run_fix == 'true'
-        continue-on-error: true
-        with:
-          name: pr-automation-candidate-patch
-          path: ${{ runner.temp }}/pr-automation-artifacts
+        env:
+          TARGET_WORKDIR: target
+          PATCH_ALLOWED_PATHS: ${{ toJSON(fromJSON(needs.plan.outputs.plan).fix_allowed_paths) }}
+        run: python -m scripts.automation.fix
       - name: Download the candidate resolution
         uses: actions/download-artifact@v7
         if: needs.plan.outputs.run_resolve_conflicts == 'true'
@@ -515,7 +485,7 @@ jobs:
   # distinct outcomes, all rendered as NOT RUN rather than a crash.
   report-to-target:
     name: report-to-target
-    needs: [plan, resolve-target, ai-analysis, validate-target, ai-resolve-conflicts]
+    needs: [plan, resolve-target, deterministic-analysis, validate-target, deterministic-resolve, privileged-fix-write]
     if: always() && needs.plan.result == 'success' && needs.resolve-target.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -545,9 +515,9 @@ jobs:
         with:
           name: pr-automation-codeowners
           path: ${{ runner.temp }}/pr-automation-artifacts
-      - name: Download AI analysis
+      - name: Download deterministic analysis
         uses: actions/download-artifact@v7
-        if: needs.ai-analysis.result != 'skipped'
+        if: needs.deterministic-analysis.result != 'skipped'
         continue-on-error: true
         with:
           name: pr-automation-analysis
@@ -575,6 +545,7 @@ jobs:
         env:
           TARGET_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_AUTOMATION_PLAN: ${{ needs.plan.outputs.plan }}
+          TARGET_REPORT_HEAD_SHA: ${{ needs.privileged-fix-write.outputs.pushed_sha || needs.resolve-target.outputs.head_sha }}
           RESULT_DIR: ${{ runner.temp }}/pr-automation-artifacts
           REVIEWERS_CONFIG: ${{ github.workspace }}/config/reviewers.yml
         run: python -m scripts.github.report
@@ -602,6 +573,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      pushed_sha: ${{ steps.push.outputs.pushed_sha }}
     steps:
       - uses: actions/checkout@v5
         with: { persist-credentials: false }
@@ -653,8 +626,10 @@ jobs:
           ref: ${{ needs.resolve-target.outputs.head_sha }}
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: false
+          fetch-depth: ${{ needs.plan.outputs.run_resolve_conflicts == 'true' && '0' || '1' }}
           path: target
       - name: Apply and push the validated patch
+        id: push
         if: steps.gate.outputs.proceed == 'true'
         env:
           TARGET_GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -662,7 +637,9 @@ jobs:
           TARGET_PR_NUMBER: ${{ inputs.pr_number }}
           TARGET_HEAD_REF: ${{ needs.resolve-target.outputs.head_ref }}
           TARGET_HEAD_SHA: ${{ needs.resolve-target.outputs.head_sha }}
+          TARGET_BASE_SHA: ${{ needs.resolve-target.outputs.base_sha }}
           TARGET_WORKDIR: target
+          PUSH_MODE: ${{ needs.plan.outputs.run_resolve_conflicts == 'true' && 'resolve-conflicts' || 'fix' }}
           PATCH_ALLOWED_PATHS: >-
             ${{ needs.plan.outputs.run_fix == 'true'
                 && toJSON(fromJSON(needs.plan.outputs.plan).fix_allowed_paths)

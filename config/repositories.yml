@@ -80,7 +80,7 @@ repositories:
       trivy: false
     metadata:
       # weak   replace only a placeholder PR title ("update", "fix", "Update x.py")
-      # always replace whenever the AI proposes something different
+      # always replace whenever automation proposes something different
       # never  never touch the title
       title_policy: weak
       # Sections of the managed PR description block, in order. Remove any you do
@@ -117,7 +117,7 @@ repositories:
       network_groups: [install]
       memory: 4g
       pids_limit: 512
-    # Paths an AI-authored patch may modify. Empty means fixes are disabled.
+    # Paths an automation-authored patch may modify. Empty means fixes are disabled.
     # The global deny list in scripts/plan.py always wins.
     fix_allowed_paths:
       - backend/app/**/*.py

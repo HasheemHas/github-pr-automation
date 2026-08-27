@@ -62,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
         number = int(env["TARGET_PR_NUMBER"])
         head_ref = env["TARGET_HEAD_REF"]
         expected_head = env["TARGET_HEAD_SHA"]
+        expected_base = env.get("TARGET_BASE_SHA") or ""
+        push_mode = env.get("PUSH_MODE") or "fix"
         allowed = json.loads(env.get("PATCH_ALLOWED_PATHS") or "[]")
         forbidden = json.loads(env.get("PATCH_FORBIDDEN_PATHS") or "[]")
         message = env.get("COMMIT_MESSAGE") or "fix: apply validated automated patch"
@@ -88,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     try:
-        check_paths(patch_text, list(allowed), list(forbidden))
+        declared = check_paths(patch_text, list(allowed), list(forbidden))
     except AutomationError as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 3
@@ -101,6 +103,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
     current = ((pr or {}).get("head") or {}).get("sha") or ""
+    current_base = ((pr or {}).get("base") or {}).get("sha") or ""
     if pr.get("state") != "open":
         print(f"::error::PR #{number} is no longer open; nothing was pushed.", file=sys.stderr)
         return 4
@@ -112,34 +115,77 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 4
 
+    if push_mode == "resolve-conflicts" and (
+        not SHA_PATTERN.match(expected_base) or current_base != expected_base
+    ):
+        print(
+            f"::error::PR #{number} base moved from {expected_base[:12]} to "
+            f"{current_base[:12]}; nothing was pushed. Re-run the workflow.",
+            file=sys.stderr,
+        )
+        return 4
+
     for args in (
         ["config", "user.name", BOT_NAME],
         ["config", "user.email", BOT_EMAIL],
         ["checkout", "--detach", expected_head],
-        ["apply", "--whitespace=nowarn", str(patch_file)],
     ):
         code, output = _run(args, cwd)
         if code != 0:
             print(f"::error::git {args[0]} failed: {output.strip()[:500]}", file=sys.stderr)
             return 1
 
-    try:
-        touched = verify_changed_paths(cwd, allowed, forbidden)
-    except AutomationError as exc:
-        print(f"::error::{exc}", file=sys.stderr)
-        return 3
+    if push_mode == "resolve-conflicts":
+        code, output = _run(["fetch", "--no-tags", "origin", expected_base], cwd, token=token)
+        if code != 0:
+            print(f"::error::Could not fetch the verified base: {output.strip()[:500]}",
+                  file=sys.stderr)
+            return 1
+        code, output = _run(["merge", "--no-commit", "--no-ff", expected_base], cwd)
+        if code == 0:
+            print("::error::The verified revisions no longer produce a conflict.", file=sys.stderr)
+            return 4
+        code, unmerged = _run(["diff", "--name-only", "--diff-filter=U"], cwd)
+        if code != 0 or not unmerged.strip():
+            print(f"::error::Merge failed without resolvable file conflicts: {output.strip()[:500]}",
+                  file=sys.stderr)
+            return 1
+
+    code, output = _run(["apply", "--whitespace=nowarn", str(patch_file)], cwd)
+    if code != 0:
+        print(f"::error::git apply failed: {output.strip()[:500]}", file=sys.stderr)
+        return 1
+
+    if push_mode == "resolve-conflicts":
+        touched = declared
+    else:
+        try:
+            touched = verify_changed_paths(cwd, allowed, forbidden)
+        except AutomationError as exc:
+            print(f"::error::{exc}", file=sys.stderr)
+            return 3
     if not touched:
         print("Patch applied but produced no changes; nothing to push.")
         return 0
 
     for args in (
         ["add", "--", *touched],
-        ["commit", "--no-verify", "-m", message],
     ):
         code, output = _run(args, cwd)
         if code != 0:
             print(f"::error::git {args[0]} failed: {output.strip()[:500]}", file=sys.stderr)
             return 1
+
+    if push_mode == "resolve-conflicts":
+        code, unmerged = _run(["diff", "--name-only", "--diff-filter=U"], cwd)
+        if code != 0 or unmerged.strip():
+            print(f"::error::Resolution left unmerged paths: {unmerged.strip()[:500]}", file=sys.stderr)
+            return 3
+
+    code, output = _run(["commit", "--no-verify", "-m", message], cwd)
+    if code != 0:
+        print(f"::error::git commit failed: {output.strip()[:500]}", file=sys.stderr)
+        return 1
 
     # Fast-forward-only push: if the branch advanced, the push is rejected.
     code, output = _run(
@@ -155,6 +201,11 @@ def main(argv: list[str] | None = None) -> int:
     if code != 0:
         print(f"::error::Push rejected: {output.strip()[:500]}", file=sys.stderr)
         return 1
+    code, pushed_sha = _run(["rev-parse", "HEAD"], cwd)
+    output_file = env.get("GITHUB_OUTPUT")
+    if code == 0 and output_file:
+        with Path(output_file).open("a", encoding="utf-8") as handle:
+            handle.write(f"pushed_sha={pushed_sha.strip()}\n")
     print(f"Pushed {len(touched)} file(s) to {full_repo}:{head_ref}.")
     return 0
 

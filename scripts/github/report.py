@@ -6,7 +6,7 @@ This is the only module that holds a write-capable token, and it executes no
 target repository code. It consumes only the explicitly named result artifacts.
 
 Fail-safe rules enforced here:
-  * a section whose AI analysis failed is rendered as ERROR/NOT RUN and its
+  * a section whose deterministic analysis failed is rendered as ERROR/NOT RUN and its
     write is skipped entirely (metadata is never overwritten with nothing)
   * a missing optional artifact is NOT RUN, which is distinct from FAIL
   * the PR head SHA is re-checked immediately before any write; if the PR moved,
@@ -71,7 +71,7 @@ def render_inline_comment(finding: Mapping[str, Any]) -> str:
         f"<!-- ai-finding:{finding_key(finding)} -->\n"
         f"{icon} **{severity}** · `{category}` — {finding.get('title')}\n"
         + (f"\n{body}\n" if body else "")
-        + "\n_AI review finding. Advisory only; resolve or dismiss as you see fit._"
+        + "\n_Automated rule finding. Advisory only; resolve or dismiss as you see fit._"
     )
 
 
@@ -129,13 +129,13 @@ def build_sections(
     sections: list[Section] = []
     analysis = analysis or {}
 
-    def ai_section(name: str, key: str, requested: bool) -> Mapping[str, Any] | None:
+    def analysis_section(name: str, key: str, requested: bool) -> Mapping[str, Any] | None:
         if not requested:
             sections.append(Section(name, NOT_RUN, "Not requested for this action."))
             return None
         entry = analysis.get(key)
         if not isinstance(entry, Mapping):
-            sections.append(Section(name, NOT_RUN, "AI analysis produced no result."))
+            sections.append(Section(name, NOT_RUN, "Deterministic analysis produced no result."))
             return None
         if entry.get("status") == "ok":
             return entry.get("data") or {}
@@ -143,12 +143,12 @@ def build_sections(
         sections.append(Section(name, ERROR if entry.get("status") == "error" else NOT_RUN, detail))
         return None
 
-    metadata = ai_section("Metadata", "metadata", bool(plan.get("metadata")))
+    metadata = analysis_section("Metadata", "metadata", bool(plan.get("metadata")))
     if metadata is not None:
         sections.append(Section("Metadata", PASS, "Summary generated"))
 
     review_requested = bool(plan.get("review") or plan.get("security"))
-    review = ai_section("Review", "review", review_requested)
+    review = analysis_section("Review", "review", review_requested)
     findings = list((review or {}).get("findings") or [])
     counts = {
         "critical": sum(1 for f in findings if f.get("severity") == "critical"),
@@ -173,7 +173,7 @@ def build_sections(
             status = PASS
         sections.append(Section("Review", status, detail))
 
-    tests = ai_section("Test coverage", "tests", bool(plan.get("tests")))
+    tests = analysis_section("Test coverage", "tests", bool(plan.get("tests")))
     gaps = list((tests or {}).get("gaps") or [])
     if tests is not None:
         sections.append(Section("Test coverage", PASS, f"{len(gaps)} potential gap(s)"))
@@ -360,7 +360,7 @@ def upsert_summary(
     """Replace the managed description block, preserving author-written text.
 
     Rendering lives in :mod:`scripts.github.body`; ``summary`` is used only as the
-    fallback description when the model returned no long-form description.
+    fallback description when analysis returned no long-form description.
     """
     payload = dict(metadata)
     if not (payload.get("description") or "").strip():
@@ -424,10 +424,10 @@ class Reporter:
         """Update the PR description, and the title when the human one is a placeholder."""
         summary = (metadata.get("summary") or "").strip()
         if not summary:
-            # Never overwrite PR metadata with an empty AI result.
-            self.notes.append("AI produced no summary; PR body left unchanged.")
+            # Never overwrite PR metadata with an empty analysis result.
+            self.notes.append("Automation produced no summary; PR body left unchanged.")
             return {"body_updated": False, "title_updated": False,
-                    "title_reason": "No AI summary, so nothing was written."}
+                    "title_reason": "No generated summary, so nothing was written."}
 
         pr = self.client.get(f"{self._repo_path}/pulls/{self.number}")
         current_title = pr.get("title") or ""
@@ -520,7 +520,7 @@ class Reporter:
             "event": "COMMENT",
             "body": (
                 f"{REVIEW_MARKER}\n"
-                f"AI review: {len(batch)} inline finding(s). "
+                f"Automated review: {len(batch)} inline finding(s). "
                 "See the PR Automation Report comment for the full picture. "
                 "This is advisory; human approval is still required."
             ),
@@ -636,7 +636,7 @@ def write_gate_summary(
             if metadata_outcome.get("title_updated")
             else f"unchanged — {metadata_outcome.get('title_reason') or 'not requested'}"
         ),
-        "Body": "AI summary block written" if metadata_outcome.get("body_updated") else "unchanged",
+        "Body": "generated summary block written" if metadata_outcome.get("body_updated") else "unchanged",
         "Reviewers": (
             "deferred to CODEOWNERS" if reviewers.get("deferred_to_codeowners")
             else ", ".join(
@@ -717,7 +717,7 @@ def main(argv: list[str] | None = None) -> int:
 
     owner, repo = plan.get("owner", ""), plan.get("repo") or plan.get("repository", "")
     number = int(context["number"])
-    head_sha = str(context["head_sha"])
+    head_sha = str(env.get("TARGET_REPORT_HEAD_SHA") or context["head_sha"])
 
     sections, data = build_sections(plan, analysis, quality, security)
     verdict = overall(sections)

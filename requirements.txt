@@ -1,3 +1,2 @@
 # Runtime dependencies for the central PR automation scripts.
-openai>=1.40.0
 PyYAML>=6.0

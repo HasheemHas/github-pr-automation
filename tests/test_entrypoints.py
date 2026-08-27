@@ -336,7 +336,6 @@ def test_report_fails_cleanly_without_a_pr_context(tmp_path, monkeypatch, capsys
         ".github/workflows/central-pr-automation.yml",
         ".github/workflows/release-central.yml",
         ".github/workflows/ci.yml",
-        ".github/workflows/verify-ai-models.yml",
         "config/repositories.yml",
         "config/reviewers.yml",
     ],
@@ -356,7 +355,6 @@ def test_the_central_repo_holds_no_legacy_same_repository_workflows():
         "central-pr-automation.yml",
         "ci.yml",
         "release-central.yml",
-        "verify-ai-models.yml",
     }
 
 
@@ -392,10 +390,23 @@ def test_no_job_uploads_the_whole_runner_temp():
             ), line
 
 
-def test_the_ai_jobs_never_check_out_the_target_repository():
+def test_the_deterministic_analysis_jobs_never_check_out_the_target_repository():
     with open(".github/workflows/central-pr-automation.yml", encoding="utf-8") as handle:
         jobs = yaml.safe_load(handle)["jobs"]
-    for name in ("ai-analysis", "ai-resolve-conflicts"):
+    for name in ("deterministic-analysis", "deterministic-resolve"):
         text = yaml.safe_dump(jobs[name])
         assert "repository:" not in text, name
         assert "full_name" not in text, name
+
+
+def test_active_workflows_have_no_ai_provider_or_model_dependency():
+    import pathlib
+
+    workflow_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in pathlib.Path(".github/workflows").glob("*.yml")
+    )
+    for value in ("NVIDIA_API_KEY", "AI_BASE_URL", "AI_METADATA_MODEL",
+                  "AI_REVIEW_MODEL", "AI_MAX_TOKENS", "scripts.ai"):
+        assert value not in workflow_text
+    assert "openai" not in pathlib.Path("requirements.txt").read_text(encoding="utf-8").lower()

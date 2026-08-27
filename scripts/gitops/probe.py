@@ -25,6 +25,12 @@ def _git(args: list[str], cwd: str, runner=subprocess.run) -> tuple[int, str]:
     return completed.returncode, (completed.stdout or "") + (completed.stderr or "")
 
 
+def _stage(cwd: str, stage: int, path: str, runner=subprocess.run) -> str | None:
+    """Read one merge-index stage without interpreting repository content."""
+    code, content = _git(["show", f":{stage}:{path}"], cwd, runner)
+    return content if code == 0 else None
+
+
 def probe(cwd: str, base_ref: str, runner=subprocess.run) -> dict:
     """Attempt the merge and collect conflicted files."""
     _git(["config", "user.name", "pr-automation"], cwd, runner)
@@ -47,13 +53,28 @@ def probe(cwd: str, base_ref: str, runner=subprocess.run) -> dict:
             content = (Path(cwd) / path).read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        conflicts.append({"path": path, "conflicted_content": content[:MAX_CONFLICT_BYTES]})
+        base = _stage(cwd, 1, path, runner)
+        ours = _stage(cwd, 2, path, runner)
+        theirs = _stage(cwd, 3, path, runner)
+        conflicts.append({
+            "path": path,
+            "conflicted_content": content[:MAX_CONFLICT_BYTES],
+            "base": base[:MAX_CONFLICT_BYTES] if base is not None else None,
+            "ours": ours[:MAX_CONFLICT_BYTES] if ours is not None else None,
+            "theirs": theirs[:MAX_CONFLICT_BYTES] if theirs is not None else None,
+            "content_truncated": any(
+                value is not None and len(value) > MAX_CONFLICT_BYTES
+                for value in (content, base, ours, theirs)
+            ),
+        })
 
     return {
         "status": "conflicted",
         "reason": merge_output[-2000:],
         "conflict_count": len(paths),
         "truncated": len(paths) > MAX_CONFLICT_FILES,
+        "head_sha": _git(["rev-parse", "HEAD"], cwd, runner)[1].strip(),
+        "base_sha": _git(["rev-parse", "FETCH_HEAD"], cwd, runner)[1].strip(),
         "conflicts": conflicts,
     }
 
@@ -61,7 +82,7 @@ def probe(cwd: str, base_ref: str, runner=subprocess.run) -> dict:
 def main(argv: list[str] | None = None) -> int:
     env = os.environ
     cwd = env.get("TARGET_WORKDIR") or "target"
-    base_ref = env.get("TARGET_BASE_REF") or "main"
+    base_ref = env.get("TARGET_BASE_SHA") or env.get("TARGET_BASE_REF") or "main"
     out_dir = artifact_dir(env)
 
     if not Path(cwd, ".git").is_dir():
