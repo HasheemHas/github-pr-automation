@@ -301,8 +301,50 @@ def _workflow_facts(change: FileChange) -> dict[str, list[str]]:
         "jobs_added": [j for j in added["jobs"] if j not in removed["jobs"]],
         "jobs_removed": [j for j in removed["jobs"] if j not in added["jobs"]],
         "triggers_added": [t for t in added["triggers"] if t not in removed["triggers"]],
+        "triggers_removed": [t for t in removed["triggers"] if t not in added["triggers"]],
         "actions_added": [u for u in added["uses"] if u not in removed["uses"]],
+        "actions_removed": [u for u in removed["uses"] if u not in added["uses"]],
     }
+
+
+def _workflow_sentence(change: FileChange) -> str:
+    """A complete natural-language sentence describing what a workflow diff does.
+
+    Every word is derived from the diff — nothing is hardcoded.  The sentence
+    names the actual actions used, the triggers added, and the jobs defined so a
+    reviewer understands the change without opening the file.
+    """
+    facts = _workflow_facts(change)
+    name = PurePosixPath(change.path).stem.replace("-", " ").replace("_", " ")
+    parts: list[str] = []
+
+    if facts["triggers_added"]:
+        triggers = _join(facts["triggers_added"], code=False)
+        parts.append(f"triggers on {triggers}")
+    if facts["triggers_removed"]:
+        parts.append(f"no longer triggers on {_join(facts['triggers_removed'], code=False)}")
+    if facts["jobs_added"]:
+        count = len(facts["jobs_added"])
+        parts.append(
+            f"adds the {_join(facts['jobs_added'])} {_plural('job', count)}"
+        )
+    if facts["jobs_removed"]:
+        count = len(facts["jobs_removed"])
+        parts.append(
+            f"removes the {_join(facts['jobs_removed'])} {_plural('job', count)}"
+        )
+    if facts["actions_added"]:
+        parts.append(f"uses {_join(facts['actions_added'], limit=3)}")
+    if facts["actions_removed"]:
+        parts.append(f"drops {_join(facts['actions_removed'], limit=3)}")
+
+    if not parts:
+        return ""
+
+    # Build: "The <name> workflow now triggers on pull_request; adds the build job."
+    subject = f"The `{name}` workflow"
+    sentence = subject + " " + "; ".join(parts) + "."
+    return sentence[0].upper() + sentence[1:]
 
 
 def _config_keys(change: FileChange) -> dict[str, list[str]]:
@@ -541,6 +583,10 @@ def describe_file(change: FileChange, stats: Mapping[str, Any] | None = None) ->
 
     if not parts and any(matches(pattern, path) for pattern in WORKFLOW_PATTERNS):
         facts = _workflow_facts(change)
+        if facts["triggers_added"]:
+            parts.append(f"triggers on {_join(facts['triggers_added'])}")
+        if facts["triggers_removed"]:
+            parts.append(f"no longer triggers on {_join(facts['triggers_removed'])}") 
         if facts["jobs_added"]:
             count = len(facts["jobs_added"])
             parts.append(
@@ -551,10 +597,10 @@ def describe_file(change: FileChange, stats: Mapping[str, Any] | None = None) ->
             parts.append(
                 f"removes the {_join(facts['jobs_removed'])} {_plural('job', count)}"
             )
-        if facts["triggers_added"]:
-            parts.append(f"triggers on {_join(facts['triggers_added'])}")
         if facts["actions_added"]:
             parts.append(f"uses {_join(facts['actions_added'], limit=3)}")
+        if facts["actions_removed"]:
+            parts.append(f"drops {_join(facts['actions_removed'], limit=3)}")
     elif not parts and any(matches(pattern, path) for pattern in MANIFEST_PATTERNS):
         parts.extend(_manifest_facts(change))
     elif not parts and any(matches(pattern, path) for pattern in MIGRATION_PATTERNS):
@@ -772,9 +818,14 @@ def _highlights(
 
     workflows = [p for p in paths if any(matches(g, p) for g in WORKFLOW_PATTERNS)]
     if workflows:
-        out.append(
-            f"{len(workflows)} CI workflow {_plural('file', len(workflows))} changed"
-        )
+        # Name the workflow files rather than just counting them so the reviewer
+        # knows at a glance which pipelines are affected.
+        names = [PurePosixPath(p).stem for p in workflows]
+        count = len(workflows)
+        label = f"{count} CI workflow {_plural('file', count)} changed"
+        if count <= 3:
+            label += f" ({_join(names, code=True, limit=3)})"
+        out.append(label)
     return out[:4]
 
 
@@ -941,9 +992,7 @@ IMPACT_SIGNALS: tuple[tuple[str, tuple[str, ...], str], ...] = (
      "Configuration changed, so a deploy may need new or updated settings."),
     ("command line", ("**/cli.py", "**/cli/**", "**/bin/**", "**/*.sh", "**/Makefile"),
      "Command-line entry points changed, so scripts and runbooks calling them may need updating."),
-    ("CI pipeline", WORKFLOW_PATTERNS,
-     "CI pipeline behaviour changed. This affects contributors and the release process, "
-     "not end users of the product."),
+    ("CI pipeline", WORKFLOW_PATTERNS, ""),  # sentence built dynamically from diff
     ("infrastructure", ("terraform/**", "**/*.tf", "helm/**", "k8s/**"),
      "Infrastructure definitions changed, so deployed resources may change on apply."),
 )
@@ -990,8 +1039,27 @@ def user_impact(
         )
 
     for label, patterns, sentence in IMPACT_SIGNALS:
-        if any(matches(pattern, path) for pattern in patterns for path in paths):
+        affected = [path for path in paths
+                    if any(matches(pattern, path) for pattern in patterns)]
+        if not affected:
+            continue
+        if sentence:
+            # Static sentence from the signal table.
             statements.append(sentence)
+        elif label == "CI pipeline":
+            # Derive the sentence from what each workflow file actually changed.
+            ci_names = [PurePosixPath(p).stem.replace("-", " ").replace("_", " ")
+                        for p in affected]
+            count = len(affected)
+            pipeline_label = (
+                f"The `{ci_names[0]}` pipeline" if count == 1
+                else f"{count} CI {_plural('pipeline', count)} "
+                     f"({_join([PurePosixPath(p).stem for p in affected], limit=3)})"
+            )
+            statements.append(
+                f"{pipeline_label} changed — this affects contributors and the "
+                "release process, not end users of the product."
+            )
 
     if not statements:
         checked = (
