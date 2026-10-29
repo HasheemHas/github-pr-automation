@@ -120,6 +120,7 @@ and two Android Gradle builds — correct, but not what you want on every PR.
 | `GH_APP_ID` | GitHub App ID |
 | `GH_APP_PRIVATE_KEY` | GitHub App private key, PEM contents |
 | `GH_APP_CLIENT_ID` | Optional modern GitHub App client ID; preferred over `GH_APP_ID` |
+| `NVIDIA_API_KEY` | Optional. Enables the model layer described below |
 
 **Actions variables:**
 
@@ -127,9 +128,37 @@ and two Android Gradle builds — correct, but not what you want on every PR.
 | --- | --- | --- |
 | `TARGET_ORG` | yes | Owner of the target repositories, e.g. `mycompany` |
 
-No AI provider, model configuration, or AI API key is required. Metadata,
-diff review, test-gap detection, safe fixes, and conflict decisions are produced
-by versioned Python rules in `scripts/automation/`.
+Metadata, diff review, test-gap detection, safe fixes, and conflict decisions
+are produced by versioned Python rules in `scripts/automation/`. These always
+run and need no AI key.
+
+**Optional model layer.** When the `NVIDIA_API_KEY` secret is set, the
+`deterministic-analysis` job also calls an OpenAI-compatible NVIDIA endpoint
+([ai_assist.py](scripts/automation/ai_assist.py)):
+
+- **PR description prose** — title, summary, description, review focus and
+  rollback come from the model. Risk, breaking changes, migrations and the test
+  plan stay measured by the rules, so the description cannot contradict the checks.
+- **Review findings** — added after the rule findings and tagged `source: ai`.
+  They are advisory: severity is capped at `medium` so a false positive cannot
+  fail the review, unless `AI_FINDINGS_CAN_BLOCK` is `true`.
+- **Fail-safe** — any model error leaves the rule output in place; the job
+  summary says which section fell back. Tests, fixes and conflict resolution
+  never use the model.
+
+The key reaches only that job, which never checks out or runs target code.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AI_ENABLED` | on when the key is set | `false` turns the model layer off without removing the key |
+| `AI_METADATA_MODEL` / `AI_REVIEW_MODEL` | `poolside/laguna-xs-2.1` | Model IDs |
+| `AI_BASE_URL` | `https://integrate.api.nvidia.com/v1` | Endpoint |
+| `AI_MAX_TOKENS` | `8192` | Output-token budget per request |
+| `AI_FINDINGS_CAN_BLOCK` | `false` | Let critical/high model findings fail the review |
+| `AI_LOG_PROMPTS` | `false` | Include prompt text in `ai-log.jsonl` |
+
+Check the configured models exist on the endpoint with
+`python -m scripts.ai.check_models`.
 
 `TARGET_ORG` is not `GITHUB_ORG`: GitHub reserves the `GITHUB_` prefix and will
 not let you create a variable with that name.

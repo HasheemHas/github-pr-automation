@@ -408,14 +408,13 @@ def test_the_deterministic_analysis_jobs_never_check_out_the_target_repository()
         assert "full_name" not in text, name
 
 
-def test_active_workflows_have_no_ai_provider_or_model_dependency():
-    import pathlib
-
-    workflow_text = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in pathlib.Path(".github/workflows").glob("*.yml")
-    )
-    for value in ("NVIDIA_API_KEY", "AI_BASE_URL", "AI_METADATA_MODEL",
-                  "AI_REVIEW_MODEL", "AI_MAX_TOKENS", "scripts.ai"):
-        assert value not in workflow_text
-    assert "openai" not in pathlib.Path("requirements.txt").read_text(encoding="utf-8").lower()
+def test_only_the_analysis_job_receives_the_model_key():
+    with open(".github/workflows/central-pr-automation.yml", encoding="utf-8") as handle:
+        jobs = yaml.safe_load(handle)["jobs"]
+    holders = [name for name, job in jobs.items()
+               if "secrets.NVIDIA_API_KEY" in yaml.safe_dump(job)]
+    assert holders == ["deterministic-analysis"]
+    # The model is optional: the key must never be a required secret.
+    with open(".github/workflows/central-pr-automation.yml", encoding="utf-8") as handle:
+        on = yaml.safe_load(handle)[True]
+    assert on["workflow_call"]["secrets"]["NVIDIA_API_KEY"]["required"] is False

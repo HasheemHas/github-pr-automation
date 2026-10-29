@@ -4,7 +4,7 @@ name: Central PR Automation
 #
 #   plan                        no credentials at all
 #   resolve-target              App read token, no target code executed
-#   deterministic-analysis     no credentials, no target code executed
+#   deterministic-analysis     optional NVIDIA key only, no target code executed
 #   prepare-validation-source   App read token, checkout only, no target code
 #   deterministic-resolve      no credentials, no target code executed
 #   validate-target             NO credentials; this is where target code runs
@@ -28,6 +28,9 @@ on:
       # alias. Either value works as the JWT issuer.
       GH_APP_CLIENT_ID: { required: false }
       GH_APP_PRIVATE_KEY: { required: true }
+      # Optional. When set, the analysis job adds model-written PR prose and
+      # advisory review findings on top of the deterministic rules.
+      NVIDIA_API_KEY: { required: false }
   workflow_dispatch:
     inputs:
       repository:
@@ -201,8 +204,9 @@ jobs:
           path: ${{ runner.temp }}/pr-automation-artifacts/codeowners.txt
 
   # ----------------------------------------------- deterministic-analysis -----
-  # Reads the sanitised context artifact, makes no network calls, and never
-  # checks out or executes target repository code.
+  # Reads the sanitised context artifact and never checks out or executes target
+  # repository code. Its only possible network call is the optional model API,
+  # made with NVIDIA_API_KEY, which no other job receives.
   deterministic-analysis:
     name: deterministic-analysis
     needs: [plan, resolve-target]
@@ -226,9 +230,17 @@ jobs:
         with:
           name: pr-automation-context
           path: ${{ runner.temp }}/pr-automation-artifacts
-      - name: Run deterministic analysis
+      - name: Run analysis
         env:
           PR_AUTOMATION_PLAN: ${{ needs.plan.outputs.plan }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          AI_ENABLED: ${{ vars.AI_ENABLED }}
+          AI_BASE_URL: ${{ vars.AI_BASE_URL }}
+          AI_METADATA_MODEL: ${{ vars.AI_METADATA_MODEL }}
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          AI_MAX_TOKENS: ${{ vars.AI_MAX_TOKENS }}
+          AI_FINDINGS_CAN_BLOCK: ${{ vars.AI_FINDINGS_CAN_BLOCK }}
+          AI_LOG_PROMPTS: ${{ vars.AI_LOG_PROMPTS }}
         run: python -m scripts.automation.analyze
       - name: Upload deterministic analysis
         uses: actions/upload-artifact@v6
@@ -240,6 +252,7 @@ jobs:
           path: |
             ${{ runner.temp }}/pr-automation-artifacts/analysis.json
             ${{ runner.temp }}/pr-automation-artifacts/release-notes.md
+            ${{ runner.temp }}/pr-automation-artifacts/ai-log.jsonl
 
   # --------------------------------------------- prepare-validation-source -----
   # Holds a read-only App token for the checkout, then hands the working tree on

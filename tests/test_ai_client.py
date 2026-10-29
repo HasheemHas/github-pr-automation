@@ -23,8 +23,8 @@ class Rejected(Exception):
 
 def test_defaults_are_the_intended_production_values():
     assert ai_client.base_url({}) == "https://integrate.api.nvidia.com/v1"
-    assert ai_client.metadata_model({}) == "nvidia/nemotron-3.5-lightning-30b-a3b"
-    assert ai_client.review_model({}) == "nvidia/nemotron-3.5-lightning-30b-a3b"
+    assert ai_client.metadata_model({}) == "poolside/laguna-xs-2.1"
+    assert ai_client.review_model({}) == "poolside/laguna-xs-2.1"
 
 
 def test_every_default_is_overridable():
@@ -41,7 +41,7 @@ def test_every_default_is_overridable():
 def test_blank_overrides_fall_back_to_the_defaults():
     env = {"AI_BASE_URL": "  ", "AI_METADATA_MODEL": "", "AI_REVIEW_MODEL": " "}
     assert ai_client.base_url(env) == "https://integrate.api.nvidia.com/v1"
-    assert ai_client.metadata_model(env) == "nvidia/nemotron-3.5-lightning-30b-a3b"
+    assert ai_client.metadata_model(env) == "poolside/laguna-xs-2.1"
 
 
 def test_a_missing_api_key_is_an_error_not_a_silent_empty_string():

@@ -1,9 +1,10 @@
 """Deterministic PR metadata, review, and test-gap analysis.
 
-This module consumes the same sanitised PR artifacts as the former model-backed
-stage and emits the same ``analysis.json`` contract.  It makes no network calls
-and needs no API key.  Findings are deliberately limited to rules that can be
-explained and reproduced from the unified diff.
+This module consumes the sanitised PR artifacts and emits the ``analysis.json``
+contract.  The rules need no network and no API key, and findings are limited to
+what can be explained and reproduced from the unified diff.  When
+``NVIDIA_API_KEY`` is set, :mod:`.ai_assist` layers model-written prose and
+advisory review findings on top; without it, no external call is made.
 """
 from __future__ import annotations
 
@@ -20,7 +21,10 @@ from ..common.config import artifact_dir
 from ..common.errors import AutomationError
 from ..insights import describe
 from ..insights import run as insights_run
+from ..ai.client import metadata_model, review_model
+from ..ai.telemetry import Recorder
 from ..insights.changes import parse_changes
+from . import ai_assist
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _ISSUE = re.compile(r"(?<![\w/])(?:[A-Z][A-Z0-9]+-\d+|#\d+)\b")
@@ -369,15 +373,36 @@ def load_plan(env: Mapping[str, str]) -> dict[str, Any]:
     return value
 
 
-def analyse(plan: Mapping[str, Any], context: Mapping[str, Any], diff: str) -> dict[str, Any]:
+def analyse(
+    plan: Mapping[str, Any],
+    context: Mapping[str, Any],
+    diff: str,
+    *,
+    env: Mapping[str, str] | None = None,
+    client=None,
+    recorder: Recorder | None = None,
+) -> dict[str, Any]:
+    # The model layer only runs when an environment with a key is passed in, so
+    # direct callers and tests stay fully deterministic.
+    assist = ai_assist.enabled(env)
     result: dict[str, Any] = {
         "action": plan.get("action"), "head_sha": context.get("head_sha"),
-        "engine": "deterministic-python-rules-v1",
+        "engine": "deterministic-python-rules-v1" + ("+ai" if assist else ""),
     }
+    ai_status: dict[str, Any] = {}
+    if assist:
+        result["ai"] = {"enabled": True,
+                        "models": {"metadata": metadata_model(env), "review": review_model(env)},
+                        "sections": ai_status}
     if plan.get("review") or plan.get("security"):
         security_only = bool(plan.get("security")) and not plan.get("review")
-        result["review"] = {"status": "ok", "data": review_diff(context, diff,
-                                                                    security_only=security_only)}
+        review = review_diff(context, diff, security_only=security_only)
+        if assist:
+            ai_assist.add_review_findings(
+                review, context, diff, security_only=security_only, env=env,
+                status=ai_status, client=client, recorder=recorder,
+            )
+        result["review"] = {"status": "ok", "data": review}
         result["review_scope"] = "security" if security_only else "full"
     if plan.get("tests"):
         result["tests"] = {"status": "ok", "data": analyse_tests(context)}
@@ -391,10 +416,13 @@ def analyse(plan: Mapping[str, Any], context: Mapping[str, Any], diff: str) -> d
         template = options.get("template") if isinstance(options, Mapping) else {}
         if not isinstance(template, Mapping):
             template = {}
-        result["metadata"] = {
-            "status": "ok",
-            "data": generate_metadata(context, template, diff=diff, insights=result),
-        }
+        metadata = generate_metadata(context, template, diff=diff, insights=result)
+        if assist:
+            # Before enrich_metadata, so measured risk, breaking changes and
+            # secret-removal focus still override whatever the model wrote.
+            ai_assist.overlay_metadata(metadata, context, diff, env=env, status=ai_status,
+                                       client=client, recorder=recorder)
+        result["metadata"] = {"status": "ok", "data": metadata}
         # Test plan and migration notes need the test-gap and migration results.
         enrich_metadata(result, context, diff=diff)
     if plan.get("fix"):
@@ -530,7 +558,7 @@ def _detail(key: str, entry: Mapping[str, Any]) -> str:
     return str(data.get("summary") or entry.get("reason") or "")
 
 
-def write_summary(result: Mapping[str, Any]) -> None:
+def write_summary(result: Mapping[str, Any], recorder: Recorder | None = None) -> None:
     rows = []
     for key, label in SUMMARY_SECTIONS:
         entry = result.get(key)
@@ -540,10 +568,18 @@ def write_summary(result: Mapping[str, Any]) -> None:
         status = str(data.get("status") or entry.get("status") or "not_run")
         rows.append([label, status.upper(), _detail(key, entry)])
 
+    ai = result.get("ai") or {}
+    calls = recorder.totals["requests"] if recorder is not None and recorder.records else 0
+    facts = {"Engine": result.get("engine", "unknown"),
+             "External AI calls": calls or "none"}
+    if ai.get("enabled"):
+        facts["AI model"] = f"`{(ai.get('models') or {}).get('review')}`"
+        for name, entry in (ai.get("sections") or {}).items():
+            facts[f"AI {name}"] = (entry.get("status") if entry.get("status") == "ok"
+                                   else f"error — {entry.get('error')} (rule output kept)")
     blocks = [
-        summary.heading("Deterministic PR analysis"),
-        summary.definitions({"Engine": result.get("engine", "unknown"),
-                             "External AI calls": "none"}),
+        summary.heading("PR analysis"),
+        summary.definitions(facts),
         summary.table(["Section", "Status", "Detail"], rows),
     ]
 
@@ -593,7 +629,8 @@ def main(argv: list[str] | None = None) -> int:
     except (AutomationError, OSError, json.JSONDecodeError) as exc:
         print(f"::error::Could not load deterministic analysis inputs: {exc}", file=sys.stderr)
         return 1
-    result = analyse(plan, context, diff)
+    recorder = Recorder.from_env(env) if ai_assist.enabled(env) else None
+    result = analyse(plan, context, diff, env=env, recorder=recorder)
     (out_dir / "analysis.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
 
     # Release notes also travel as a standalone file so a release job can consume
@@ -602,14 +639,22 @@ def main(argv: list[str] | None = None) -> int:
     if markdown:
         (out_dir / "release-notes.md").write_text(markdown + "\n", encoding="utf-8")
 
-    write_summary(result)
+    if recorder is not None:
+        # One JSON object per model request, for after-the-fact debugging.
+        recorder.write(out_dir / "ai-log.jsonl")
+    write_summary(result, recorder)
     for key, label in SUMMARY_SECTIONS:
         entry = result.get(key)
         if isinstance(entry, Mapping):
             data = entry.get("data") or {}
             status = str(data.get("status") or entry.get("status") or "not_run")
             print(f"{label}: {status.upper()} — {_detail(key, entry)}")
-    print("Deterministic analysis complete; no external AI service was called.")
+    if recorder is not None:
+        totals = recorder.totals
+        print(f"Analysis complete; {totals['requests']} model request(s), "
+              f"{totals['failed']} failed.")
+    else:
+        print("Deterministic analysis complete; no external AI service was called.")
     return 0
 
 

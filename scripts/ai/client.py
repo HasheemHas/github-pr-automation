@@ -24,9 +24,9 @@ DEFAULT_MAX_TOKENS = 8192
 PREVIEW_CHARS = 300
 
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
-DEFAULT_METADATA_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
+DEFAULT_METADATA_MODEL = "poolside/laguna-xs-2.1"
 # Review, test-gap analysis and patch generation all use this model.
-DEFAULT_REVIEW_MODEL = "nvidia/nemotron-3.5-lightning-30b-a3b"
+DEFAULT_REVIEW_MODEL = "poolside/laguna-xs-2.1"
 
 #: Substrings that indicate the model/provider rejected structured-output mode
 #: rather than rejecting our prompt.
